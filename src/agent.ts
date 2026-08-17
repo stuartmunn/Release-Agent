@@ -129,16 +129,23 @@ function truncate(text: string, max: number): string {
  * follow-ups can be answered without a live call. `raw` is deliberately omitted to keep
  * token usage down — `summary` carries the substance.
  */
-export function buildReleaseContext(releases: Release[], maxSummaryChars = 1500): string {
+export function buildReleaseContext(
+  releases: Release[],
+  opts: { maxChars?: number; includeContent?: boolean } = {},
+): string {
+  const { maxChars = 1500, includeContent = false } = opts;
   if (releases.length === 0) return "(no releases in cache)";
   return releases
     .map((r, i) => {
       const head = `### ${i + 1}. ${r.vendor}${r.product ? ` / ${r.product}` : ""} — ${r.title}`;
+      // Digests use the concise summary; follow-ups prefer the full notes so they can be
+      // answered from cache without a live call.
+      const notes = includeContent ? (r.content ?? r.summary) : (r.summary ?? r.content);
       const lines = [
         head,
         r.publishedAt ? `- published: ${r.publishedAt}` : null,
         r.url ? `- url: ${r.url}` : null,
-        `- notes: ${r.summary ? truncate(r.summary, maxSummaryChars) : "(none cached)"}`,
+        `- notes: ${notes ? truncate(notes, maxChars) : "(none cached)"}`,
         `- id: ${r.id}`,
       ].filter((l): l is string => l !== null);
       return lines.join("\n");
@@ -234,7 +241,7 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
       `approval (the app enforces this).`,
     `---\n# Skill: release-deep-dive\n${readSkill("release-deep-dive")}`,
     `---\n# Skill: vendors\n${readSkill("vendors")}`,
-    `---\n# Cached releases (answer from these first)\n${buildReleaseContext(p.releases)}`,
+    `---\n# Cached releases (answer from these first)\n${buildReleaseContext(p.releases, { includeContent: true, maxChars: 4000 })}`,
   ].join("\n\n");
 
   const prompt = buildConversationPrompt(p.history ?? [], p.question);

@@ -6,7 +6,8 @@
  */
 import cron from "node-cron";
 import { loadConfig } from "./config.js";
-import { openDb } from "./cache.js";
+import { openDb, renormaliseIfNeeded } from "./cache.js";
+import { NORMALISER_VERSION, normaliseRelease } from "./releasebot.js";
 import { createBot, sendChunked, startBot } from "./telegram.js";
 import { dailyJob } from "./digest.js";
 import { logger } from "./logger.js";
@@ -14,6 +15,9 @@ import { logger } from "./logger.js";
 function main(): void {
   const config = loadConfig();
   const db = openDb(config.dbPath);
+  // Re-normalise any cached rows written by an older normaliser (free, no fetch).
+  const healed = renormaliseIfNeeded(db, NORMALISER_VERSION, normaliseRelease);
+  if (healed > 0) logger.info({ healed }, "re-normalised cached releases on startup");
   const bot = createBot(config.telegram.botToken);
 
   const send = (text: string): Promise<void> =>
