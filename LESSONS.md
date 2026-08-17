@@ -84,3 +84,13 @@ When PR Agent flags something, add an entry below in this format:
   existing data for free instead of re-fetching (which would re-spend credits).
 - **Also:** cache the *full* notes (`formattedContent`), not just the short summary, so
   follow-ups are genuinely answerable from cache without a paid live call.
+
+## Make schema migrations and bulk re-derivations atomic  (PR #7, 2026-08-17)
+- **Flagged:** `migrate()` split its DDL across two `db.exec` calls (a crash between them
+  could leave a half-built schema), and `renormaliseIfNeeded` re-wrote all rows then
+  stamped the version without a transaction (a mid-way throw could leave a mix of
+  old/new rows).
+- **Rule:** wrap any multi-statement migration and any bulk re-derivation of stored data
+  in a single `db.transaction(...)` so it fully succeeds or fully rolls back. Stamp the
+  "done" marker inside the same transaction. (`CREATE ... IF NOT EXISTS` is idempotent, but
+  atomicity is clearer and safer than relying on next-boot self-repair.)

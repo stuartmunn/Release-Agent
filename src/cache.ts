@@ -28,44 +28,45 @@ export function openDb(dbPath: string): Db {
 }
 
 function migrate(db: Db): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS releases (
-      id            TEXT PRIMARY KEY,
-      vendor        TEXT NOT NULL,
-      product       TEXT,
-      title         TEXT NOT NULL,
-      url           TEXT,
-      published_at  TEXT,
-      discovered_at TEXT,
-      summary       TEXT,
-      content       TEXT,
-      raw_json      TEXT NOT NULL,
-      fetched_at    TEXT NOT NULL
+  // Run all schema steps in one transaction so the database is never left half-migrated.
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS releases (
+        id            TEXT PRIMARY KEY,
+        vendor        TEXT NOT NULL,
+        product       TEXT,
+        title         TEXT NOT NULL,
+        url           TEXT,
+        published_at  TEXT,
+        discovered_at TEXT,
+        summary       TEXT,
+        content       TEXT,
+        raw_json      TEXT NOT NULL,
+        fetched_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_releases_vendor ON releases (vendor);
+      CREATE INDEX IF NOT EXISTS idx_releases_discovered ON releases (discovered_at);
+
+      CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS credit_log (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts        TEXT NOT NULL,
+        remaining INTEGER NOT NULL
+      );
+    `);
+
+    // Add columns introduced after the first release, for databases created earlier.
+    const cols = new Set(
+      (db.prepare(`PRAGMA table_info(releases)`).all() as { name: string }[]).map((c) => c.name),
     );
-    CREATE INDEX IF NOT EXISTS idx_releases_vendor ON releases (vendor);
-    CREATE INDEX IF NOT EXISTS idx_releases_discovered ON releases (discovered_at);`);
-
-  // Add columns introduced after the first release, for databases created earlier.
-  const cols = new Set(
-    (db.prepare(`PRAGMA table_info(releases)`).all() as { name: string }[]).map((c) => c.name),
-  );
-  if (!cols.has("content")) {
-    db.exec(`ALTER TABLE releases ADD COLUMN content TEXT`);
-  }
-
-  db.exec(`
-
-    CREATE TABLE IF NOT EXISTS meta (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS credit_log (
-      id        INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts        TEXT NOT NULL,
-      remaining INTEGER NOT NULL
-    );
-  `);
+    if (!cols.has("content")) {
+      db.exec(`ALTER TABLE releases ADD COLUMN content TEXT`);
+    }
+  })();
 }
 
 /**
@@ -226,8 +227,14 @@ export function renormaliseIfNeeded(
 
   const rows = db.prepare(`SELECT raw_json FROM releases`).all() as { raw_json: string }[];
   const releases = rows.map((r) => normalise(JSON.parse(r.raw_json)));
-  if (releases.length > 0) upsertReleases(db, releases);
-  setMeta(db, key, String(version));
+  // Atomic: either every row is re-normalised and the version is stamped, or nothing
+  // changes (so a failure mid-way retries cleanly on next boot rather than leaving a
+  // partial mix of old/new rows). Nested inside upsertReleases' own transaction via a
+  // savepoint, which better-sqlite3 handles.
+  db.transaction(() => {
+    if (releases.length > 0) upsertReleases(db, releases);
+    setMeta(db, key, String(version));
+  })();
   return releases.length;
 }
 
