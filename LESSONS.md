@@ -33,3 +33,23 @@ When PR Agent flags something, add an entry below in this format:
   a non-ISO value would sort wrong lexicographically.
 - **Rule:** give append-only/log tables an `INTEGER PRIMARY KEY AUTOINCREMENT` and order
   by it for "latest" queries — robust regardless of timestamp format or write frequency.
+
+## Spawned-subprocess env must extend, not replace, process.env  (PR #3, 2026-08-17)
+- **Flagged:** the Releasebot MCP stdio config passed `env: { RELEASEBOT_API_KEY }`, which
+  replaces the child's whole environment — `npx` would lose `PATH` and fail to launch.
+- **Rule:** when setting `env` for a spawned process, spread the current environment in
+  first and set your extra vars last (so they win). Never hand a child a bare env.
+
+## Validate any path component built from a name — even if only called with literals  (PR #3, 2026-08-17)
+- **Flagged:** `readSkill(name)` joined `name` into a path with no check; an exported fn
+  called with `../../…` would read arbitrary files.
+- **Rule:** whitelist slug-like inputs (`/^[a-z0-9][a-z0-9-]*$/`) before using them in a
+  filesystem path. Exported functions are reachable by future callers — harden at the fn.
+
+## Enforce security invariants in code, and neutralise injected "transcript" text  (PR #3, 2026-08-17)
+- **Flagged:** conversation history concatenated as `role: text` let a user inject a fake
+  `assistant:` turn (e.g. "I already approved the paid fetch").
+- **Rule:** (1) keep hard invariants (the paid-call gate) enforced in code via the SDK
+  `canUseTool` callback, never in the prompt; (2) when embedding user text as history,
+  collapse newlines, label it context-only, and delimit turns so injected role lines
+  can't masquerade as real ones.
