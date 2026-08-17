@@ -71,3 +71,16 @@ When PR Agent flags something, add an entry below in this format:
 - **TS note:** an early-return truthy guard narrows a nullable field to `null` for the rest
   of the scope, so a later `if (x)` sees `never`. Move the cleanup into a helper that takes
   the owning object as a parameter to get the full declared type back.
+
+## Confirm real payload shapes on first live data; make normalisers self-healing  (live run, 2026-08-17)
+- **Found:** the `feed --json` shape was nested (`vendor.name`, `product.name`,
+  `releaseDetails.release_name/release_summary`, `formattedContent`), not the flat keys the
+  normaliser guessed — so every release came through as `unknown` with no notes. The digest
+  ran end-to-end but was useless.
+- **Rule:** (1) don't ship a parser built on guessed field names — verify against real data
+  as soon as it's available (the cached `raw_json` let us do this for **zero** API credits).
+  (2) Always keep the full raw payload so you can re-derive fields later. (3) Version the
+  normaliser and re-normalise cached rows from `raw_json` on boot when it changes — fixes
+  existing data for free instead of re-fetching (which would re-spend credits).
+- **Also:** cache the *full* notes (`formattedContent`), not just the short summary, so
+  follow-ups are genuinely answerable from cache without a paid live call.

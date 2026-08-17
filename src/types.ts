@@ -20,8 +20,10 @@ export interface Release {
   publishedAt: string | null;
   /** ISO date Releasebot discovered it (what `--since` filters on), if known. */
   discoveredAt: string | null;
-  /** Short summary/body text if the feed provides one. */
+  /** Short summary text if the feed provides one (used for the digest). */
   summary: string | null;
+  /** Full release notes/body if available (used to answer follow-ups from cache). */
+  content: string | null;
   /** The full original object from Releasebot. */
   raw: unknown;
 }

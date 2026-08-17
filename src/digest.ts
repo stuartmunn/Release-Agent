@@ -11,14 +11,22 @@
 import type { Config } from "./config.js";
 import { loadConfig } from "./config.js";
 import {
+  getAllReleases,
   getLastRun,
   logCredits,
   openDb,
+  renormaliseIfNeeded,
   setLastRun,
   upsertReleases,
   type Db,
 } from "./cache.js";
-import { fetchFeedSince, inferSpend, ReleasebotError } from "./releasebot.js";
+import {
+  fetchFeedSince,
+  inferSpend,
+  NORMALISER_VERSION,
+  normaliseRelease,
+  ReleasebotError,
+} from "./releasebot.js";
 import { generateDigest } from "./agent.js";
 import { createBot, sendChunked } from "./telegram.js";
 import { logger } from "./logger.js";
@@ -98,28 +106,51 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
   }
 }
 
-/** Manual one-shot entrypoint: `npm run digest:now`. Sends via the bot API, no polling. */
+/** Max releases to include when re-summarising the cache (bounds tokens). */
+const REDIGEST_LIMIT = 50;
+
+/**
+ * Re-summarise what's already cached and send it, WITHOUT fetching (0 credits). Useful
+ * after a normaliser fix or to re-read today's digest. Run with `--redigest`.
+ */
+export async function redigest({ config, db, send }: DailyJobDeps): Promise<void> {
+  const releases = getAllReleases(db).slice(0, REDIGEST_LIMIT);
+  if (releases.length === 0) {
+    await send("Nothing cached yet — run a digest first.");
+    return;
+  }
+  logger.info({ count: releases.length }, "redigest: summarising cached releases");
+  await send(await generateDigest(config.anthropic.model, releases));
+}
+
+/** Manual one-shot entrypoint. `--now` fetches + digests; `--redigest` re-summarises cache. */
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = openDb(config.dbPath);
+  // Heal any stale-normalised rows for free before doing anything else.
+  const healed = renormaliseIfNeeded(db, NORMALISER_VERSION, normaliseRelease);
+  if (healed > 0) logger.info({ healed }, "re-normalised cached releases");
+
   const bot = createBot(config.telegram.botToken);
+  const send = (text: string): Promise<void> =>
+    sendChunked(bot.api, config.telegram.chatId, text);
   try {
-    await dailyJob({
-      config,
-      db,
-      send: (text) => sendChunked(bot.api, config.telegram.chatId, text),
-    });
+    if (process.argv.includes("--redigest")) {
+      await redigest({ config, db, send });
+    } else {
+      await dailyJob({ config, db, send });
+    }
   } finally {
     db.close();
   }
 }
 
-// Run only when invoked directly with --now (not when imported).
-if (process.argv.includes("--now")) {
+// Run only when invoked directly with a flag (not when imported).
+if (process.argv.includes("--now") || process.argv.includes("--redigest")) {
   main().then(
     () => process.exit(0),
     (err) => {
-      logger.error({ err }, "digest:now failed");
+      logger.error({ err }, "digest run failed");
       process.exit(1);
     },
   );

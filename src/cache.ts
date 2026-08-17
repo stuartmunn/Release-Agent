@@ -38,11 +38,22 @@ function migrate(db: Db): void {
       published_at  TEXT,
       discovered_at TEXT,
       summary       TEXT,
+      content       TEXT,
       raw_json      TEXT NOT NULL,
       fetched_at    TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_releases_vendor ON releases (vendor);
-    CREATE INDEX IF NOT EXISTS idx_releases_discovered ON releases (discovered_at);
+    CREATE INDEX IF NOT EXISTS idx_releases_discovered ON releases (discovered_at);`);
+
+  // Add columns introduced after the first release, for databases created earlier.
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(releases)`).all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!cols.has("content")) {
+    db.exec(`ALTER TABLE releases ADD COLUMN content TEXT`);
+  }
+
+  db.exec(`
 
     CREATE TABLE IF NOT EXISTS meta (
       key   TEXT PRIMARY KEY,
@@ -66,9 +77,9 @@ export function upsertReleases(db: Db, releases: Release[]): number {
   const existing = db.prepare(`SELECT 1 FROM releases WHERE id = ?`);
   const stmt = db.prepare(`
     INSERT INTO releases
-      (id, vendor, product, title, url, published_at, discovered_at, summary, raw_json, fetched_at)
+      (id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json, fetched_at)
     VALUES
-      (@id, @vendor, @product, @title, @url, @publishedAt, @discoveredAt, @summary, @rawJson, @fetchedAt)
+      (@id, @vendor, @product, @title, @url, @publishedAt, @discoveredAt, @summary, @content, @rawJson, @fetchedAt)
     ON CONFLICT(id) DO UPDATE SET
       vendor        = excluded.vendor,
       product       = excluded.product,
@@ -77,6 +88,7 @@ export function upsertReleases(db: Db, releases: Release[]): number {
       published_at  = excluded.published_at,
       discovered_at = excluded.discovered_at,
       summary       = excluded.summary,
+      content       = excluded.content,
       raw_json      = excluded.raw_json
   `);
 
@@ -100,6 +112,7 @@ export function upsertReleases(db: Db, releases: Release[]): number {
         publishedAt: r.publishedAt,
         discoveredAt: r.discoveredAt,
         summary: r.summary,
+        content: r.content,
         rawJson: JSON.stringify(r.raw),
         fetchedAt: now,
       });
@@ -119,6 +132,7 @@ interface ReleaseRow {
   published_at: string | null;
   discovered_at: string | null;
   summary: string | null;
+  content: string | null;
   raw_json: string;
 }
 
@@ -132,6 +146,7 @@ function rowToRelease(row: ReleaseRow): Release {
     publishedAt: row.published_at,
     discoveredAt: row.discovered_at,
     summary: row.summary,
+    content: row.content,
     raw: JSON.parse(row.raw_json),
   };
 }
@@ -140,7 +155,7 @@ function rowToRelease(row: ReleaseRow): Release {
 export function getAllReleases(db: Db): Release[] {
   const rows = db
     .prepare(
-      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, raw_json
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json
        FROM releases
        ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC`,
     )
@@ -152,7 +167,7 @@ export function getAllReleases(db: Db): Release[] {
 export function getReleasesSince(db: Db, sinceIso: string): Release[] {
   const rows = db
     .prepare(
-      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, raw_json
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json
        FROM releases
        WHERE COALESCE(discovered_at, published_at, fetched_at) >= ?
        ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC`,
@@ -193,6 +208,27 @@ export function logCredits(db: Db, remaining: number): void {
     new Date().toISOString(),
     remaining,
   );
+}
+
+/**
+ * Re-normalise every cached release from its stored `raw_json` when the normaliser has
+ * changed since we last recorded it. Free (no API calls) — the raw payloads are already
+ * cached — so improving `normaliseRelease` retroactively fixes existing rows on next boot.
+ * Returns the number of rows re-normalised (0 if already up to date).
+ */
+export function renormaliseIfNeeded(
+  db: Db,
+  version: number,
+  normalise: (raw: unknown) => Release,
+): number {
+  const key = "normaliser_version";
+  if (getMeta(db, key) === String(version)) return 0;
+
+  const rows = db.prepare(`SELECT raw_json FROM releases`).all() as { raw_json: string }[];
+  const releases = rows.map((r) => normalise(JSON.parse(r.raw_json)));
+  if (releases.length > 0) upsertReleases(db, releases);
+  setMeta(db, key, String(version));
+  return releases.length;
 }
 
 /** Most recently recorded remaining-credit reading, or null if none logged. */

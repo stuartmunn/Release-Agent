@@ -119,26 +119,54 @@ function extractCredits(parsed: unknown): number | null {
   return null;
 }
 
-/** Map one raw item to a normalised Release, keeping the original in `raw`. */
+/**
+ * Bumped whenever `normaliseRelease` changes how it maps fields. The cache re-normalises
+ * its stored raw payloads (for free) when this differs from what it last recorded.
+ */
+export const NORMALISER_VERSION = 2;
+
+/** A vendor/product may be a nested object ({name,slug}) or a plain string. */
+function pickName(v: unknown): string | null {
+  if (typeof v === "string" && v.trim() !== "") return v.trim();
+  const o = asRecord(v);
+  return o ? pickString(o, ["name", "slug", "title"]) : null;
+}
+
+/**
+ * Map one raw feed item to a normalised Release, keeping the original in `raw`.
+ *
+ * Grounded in the real `releasebot feed --json` shape (confirmed from live data):
+ *   { id, slug, releaseDate, createdAt,
+ *     releaseDetails: { release_name, release_number, release_summary, release_deep_source },
+ *     formattedContent, vendor: {name}, product: {name}, source: {url} }
+ * Flat fallbacks are kept so the parser degrades gracefully if the shape shifts.
+ */
 export function normaliseRelease(item: unknown): Release {
   const obj = asRecord(item) ?? {};
-  const vendor = pickString(obj, ["vendor", "vendor_name", "vendorName", "source"]) ?? "unknown";
-  const product = pickString(obj, ["product", "product_name", "productName", "slug"]);
-  const title = pickString(obj, ["title", "name", "headline"]) ?? "(untitled release)";
-  const url = pickString(obj, ["url", "link", "permalink", "html_url"]);
+  const details = asRecord(obj["releaseDetails"]) ?? {};
+  const source = asRecord(obj["source"]);
+
+  const vendor = pickName(obj["vendor"]) ?? "unknown";
+  const product = pickName(obj["product"]);
+  const title =
+    pickString(details, ["release_name", "release_number"]) ??
+    pickString(obj, ["title", "name", "headline", "slug"]) ??
+    "(untitled release)";
+  const url =
+    (source && pickString(source, ["url"])) ??
+    pickString(details, ["release_deep_source"]) ??
+    pickString(obj, ["url", "link", "permalink", "html_url"]);
   const publishedAt = toIso(
-    pickString(obj, ["published_at", "publishedAt", "date", "published", "released_at"]),
+    pickString(obj, ["releaseDate", "published_at", "publishedAt", "date", "released_at"]),
   );
   const discoveredAt = toIso(
-    pickString(obj, ["discovered_at", "discoveredAt", "seen_at", "created_at", "indexed_at"]),
+    pickString(obj, ["createdAt", "discovered_at", "discoveredAt", "seen_at", "created_at"]),
   );
-  const summary = pickString(obj, ["summary", "description", "body", "content", "notes"]);
+  const summary = pickString(details, ["release_summary"]) ?? pickString(obj, ["summary", "description", "notes"]);
+  const content = pickString(obj, ["formattedContent", "body", "content"]);
 
-  // Prefer a genuinely unique explicit id. `slug` is excluded here — it's already
-  // used for `product` and is not unique per release (e.g. "chrome" repeats across
-  // every Chrome release). When there's no explicit id we hash the distinguishing
-  // fields (url included) rather than using `url` alone as the key, so releases that
-  // share a changelog URL don't collide and overwrite each other in the cache.
+  // Prefer a genuinely unique explicit id (the feed's numeric id). When absent, hash the
+  // distinguishing fields — never key on a value that can legitimately repeat.
   const explicitId = pickString(obj, ["id", "guid", "uuid"]);
   const id =
     explicitId ??
@@ -147,7 +175,7 @@ export function normaliseRelease(item: unknown): Release {
       .digest("hex")
       .slice(0, 16);
 
-  return { id, vendor, product, title, url, publishedAt, discoveredAt, summary, raw: item };
+  return { id, vendor, product, title, url, publishedAt, discoveredAt, summary, content, raw: item };
 }
 
 /**
