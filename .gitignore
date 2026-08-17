@@ -1,0 +1,27 @@
+# --- Secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+.releasebot/
+
+# --- Local data / cache (persisted in the /data volume) ---
+/data/
+*.sqlite
+*.sqlite3
+*.db
+
+# --- Node ---
+node_modules/
+dist/
+*.log
+npm-debug.log*
+.npm/
+
+# --- Editor / OS ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
