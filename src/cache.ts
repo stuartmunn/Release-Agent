@@ -1,0 +1,204 @@
+/**
+ * Local SQLite cache — the source of truth for follow-up questions.
+ *
+ * The daily feed is paid for once, cached in full here, and follow-ups read from
+ * this store (0 credits). Three tables:
+ *   - releases    : one row per release, keyed by id; `raw_json` holds the full payload.
+ *   - meta        : key/value scratch (e.g. `last_run` timestamp).
+ *   - credit_log  : running record of remaining Releasebot credits over time.
+ *
+ * better-sqlite3 is synchronous, which keeps this code simple and race-free for a
+ * single-process app.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import Database from "better-sqlite3";
+import type { Release } from "./types.js";
+
+export type Db = Database.Database;
+
+/** Open (creating if needed) the database at `dbPath` and ensure the schema exists. */
+export function openDb(dbPath: string): Db {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  migrate(db);
+  return db;
+}
+
+function migrate(db: Db): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS releases (
+      id            TEXT PRIMARY KEY,
+      vendor        TEXT NOT NULL,
+      product       TEXT,
+      title         TEXT NOT NULL,
+      url           TEXT,
+      published_at  TEXT,
+      discovered_at TEXT,
+      summary       TEXT,
+      raw_json      TEXT NOT NULL,
+      fetched_at    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_releases_vendor ON releases (vendor);
+    CREATE INDEX IF NOT EXISTS idx_releases_discovered ON releases (discovered_at);
+
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credit_log (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts        TEXT NOT NULL,
+      remaining INTEGER NOT NULL
+    );
+  `);
+}
+
+/**
+ * Insert or update releases by id (idempotent — re-running the daily job never
+ * duplicates rows). Returns the number of rows that were newly inserted.
+ */
+export function upsertReleases(db: Db, releases: Release[]): number {
+  const now = new Date().toISOString();
+  const existing = db.prepare(`SELECT 1 FROM releases WHERE id = ?`);
+  const stmt = db.prepare(`
+    INSERT INTO releases
+      (id, vendor, product, title, url, published_at, discovered_at, summary, raw_json, fetched_at)
+    VALUES
+      (@id, @vendor, @product, @title, @url, @publishedAt, @discoveredAt, @summary, @rawJson, @fetchedAt)
+    ON CONFLICT(id) DO UPDATE SET
+      vendor        = excluded.vendor,
+      product       = excluded.product,
+      title         = excluded.title,
+      url           = excluded.url,
+      published_at  = excluded.published_at,
+      discovered_at = excluded.discovered_at,
+      summary       = excluded.summary,
+      raw_json      = excluded.raw_json
+  `);
+
+  const insertMany = db.transaction((rows: Release[]) => {
+    // De-duplicate by id first (keep the last occurrence — freshest in a batch), so
+    // the "newly inserted" count is provably the number of genuinely new ids and we
+    // don't write the same row twice.
+    const byId = new Map<string, Release>();
+    for (const r of rows) byId.set(r.id, r);
+
+    let inserted = 0;
+    for (const r of byId.values()) {
+      const isNew = existing.get(r.id) === undefined;
+      if (isNew) inserted += 1;
+      stmt.run({
+        id: r.id,
+        vendor: r.vendor,
+        product: r.product,
+        title: r.title,
+        url: r.url,
+        publishedAt: r.publishedAt,
+        discoveredAt: r.discoveredAt,
+        summary: r.summary,
+        rawJson: JSON.stringify(r.raw),
+        fetchedAt: now,
+      });
+    }
+    return inserted;
+  });
+
+  return insertMany(releases);
+}
+
+interface ReleaseRow {
+  id: string;
+  vendor: string;
+  product: string | null;
+  title: string;
+  url: string | null;
+  published_at: string | null;
+  discovered_at: string | null;
+  summary: string | null;
+  raw_json: string;
+}
+
+function rowToRelease(row: ReleaseRow): Release {
+  return {
+    id: row.id,
+    vendor: row.vendor,
+    product: row.product,
+    title: row.title,
+    url: row.url,
+    publishedAt: row.published_at,
+    discoveredAt: row.discovered_at,
+    summary: row.summary,
+    raw: JSON.parse(row.raw_json),
+  };
+}
+
+/** All cached releases, newest discovered first. */
+export function getAllReleases(db: Db): Release[] {
+  const rows = db
+    .prepare(
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, raw_json
+       FROM releases
+       ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC`,
+    )
+    .all() as ReleaseRow[];
+  return rows.map(rowToRelease);
+}
+
+/** Releases discovered on/after `sinceIso` (used to build "today's" digest). */
+export function getReleasesSince(db: Db, sinceIso: string): Release[] {
+  const rows = db
+    .prepare(
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, raw_json
+       FROM releases
+       WHERE COALESCE(discovered_at, published_at, fetched_at) >= ?
+       ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC`,
+    )
+    .all(sinceIso) as ReleaseRow[];
+  return rows.map(rowToRelease);
+}
+
+// --- meta (key/value) ---
+
+export function getMeta(db: Db, key: string): string | null {
+  const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key) as
+    | { value: string }
+    | undefined;
+  return row?.value ?? null;
+}
+
+export function setMeta(db: Db, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, value);
+}
+
+/** ISO timestamp of the last successful feed fetch, or null if never run. */
+export function getLastRun(db: Db): string | null {
+  return getMeta(db, "last_run");
+}
+
+export function setLastRun(db: Db, iso: string): void {
+  setMeta(db, "last_run", iso);
+}
+
+// --- credit log ---
+
+export function logCredits(db: Db, remaining: number): void {
+  db.prepare(`INSERT INTO credit_log (ts, remaining) VALUES (?, ?)`).run(
+    new Date().toISOString(),
+    remaining,
+  );
+}
+
+/** Most recently recorded remaining-credit reading, or null if none logged. */
+export function getLatestCredits(db: Db): number | null {
+  const row = db
+    .prepare(`SELECT remaining FROM credit_log ORDER BY id DESC LIMIT 1`)
+    .get() as { remaining: number } | undefined;
+  return row?.remaining ?? null;
+}
