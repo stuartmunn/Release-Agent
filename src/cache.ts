@@ -50,6 +50,7 @@ function migrate(db: Db): void {
     );
 
     CREATE TABLE IF NOT EXISTS credit_log (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
       ts        TEXT NOT NULL,
       remaining INTEGER NOT NULL
     );
@@ -80,8 +81,14 @@ export function upsertReleases(db: Db, releases: Release[]): number {
   `);
 
   const insertMany = db.transaction((rows: Release[]) => {
+    // De-duplicate by id first (keep the last occurrence — freshest in a batch), so
+    // the "newly inserted" count is provably the number of genuinely new ids and we
+    // don't write the same row twice.
+    const byId = new Map<string, Release>();
+    for (const r of rows) byId.set(r.id, r);
+
     let inserted = 0;
-    for (const r of rows) {
+    for (const r of byId.values()) {
       const isNew = existing.get(r.id) === undefined;
       if (isNew) inserted += 1;
       stmt.run({
@@ -191,7 +198,7 @@ export function logCredits(db: Db, remaining: number): void {
 /** Most recently recorded remaining-credit reading, or null if none logged. */
 export function getLatestCredits(db: Db): number | null {
   const row = db
-    .prepare(`SELECT remaining FROM credit_log ORDER BY ts DESC LIMIT 1`)
+    .prepare(`SELECT remaining FROM credit_log ORDER BY id DESC LIMIT 1`)
     .get() as { remaining: number } | undefined;
   return row?.remaining ?? null;
 }

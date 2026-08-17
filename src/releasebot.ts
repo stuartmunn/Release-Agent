@@ -134,12 +134,16 @@ export function normaliseRelease(item: unknown): Release {
   );
   const summary = pickString(obj, ["summary", "description", "body", "content", "notes"]);
 
-  const explicitId = pickString(obj, ["id", "guid", "uuid", "slug"]);
+  // Prefer a genuinely unique explicit id. `slug` is excluded here — it's already
+  // used for `product` and is not unique per release (e.g. "chrome" repeats across
+  // every Chrome release). When there's no explicit id we hash the distinguishing
+  // fields (url included) rather than using `url` alone as the key, so releases that
+  // share a changelog URL don't collide and overwrite each other in the cache.
+  const explicitId = pickString(obj, ["id", "guid", "uuid"]);
   const id =
     explicitId ??
-    url ??
     createHash("sha1")
-      .update([vendor, product ?? "", title, publishedAt ?? ""].join("|"))
+      .update([vendor, product ?? "", title, publishedAt ?? "", url ?? ""].join("|"))
       .digest("hex")
       .slice(0, 16);
 
