@@ -62,6 +62,17 @@ When PR Agent flags something, add an entry below in this format:
   side effect it represents has succeeded — so a transient failure retries rather than
   silently skipping. Accept the small cost of re-doing idempotent work on retry.
 
+## Don't hard-depend on a devDependency at runtime (pino-pretty)  (live run, 2026-08-17)
+- **Found:** the runtime image prunes devDependencies, but the logger loaded the
+  `pino-pretty` transport whenever stdout was a TTY. `docker compose up -d` (no TTY) was
+  fine, but `docker compose exec` **allocates a TTY**, so the one-shot crashed with
+  "unable to determine transport target for pino-pretty".
+- **Rule:** anything only present in dev (pretty printers, test helpers) must be optional
+  at runtime — guard with `require.resolve(...)` (via `createRequire` in ESM) and fall
+  back, and/or wrap construction in try/catch. Never let a pruned module be on a hot path.
+- **Also:** behaviour that keys off `process.stdout.isTTY` differs between a detached
+  container and `exec` — test both. `docker compose exec -T` (no TTY) is a quick workaround.
+
 ## Clean up timers and parked async state in `finally`, not just the happy path  (PR #4, 2026-08-17)
 - **Flagged:** the paid-call confirmation parked a `setTimeout`; if `answerQuestion` threw
   before the user replied, the timer was never cleared and would later fire on a stale
