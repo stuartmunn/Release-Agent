@@ -22,8 +22,8 @@ import type { ReleasebotTier } from "./types.js";
 const TG_MAX = 4096;
 /** How long to wait for a yes/no before declining a paid call. */
 const CONFIRM_TIMEOUT_MS = 120_000;
-/** Conversation turns kept for context. */
-const HISTORY_LIMIT = 6;
+/** Conversation messages kept for context — 12 messages = 6 user/assistant turns. */
+const HISTORY_MESSAGES = 12;
 
 export function createBot(token: string): Bot {
   return new Bot(token);
@@ -79,6 +79,14 @@ interface ChatState {
   busy: boolean;
   history: { role: "user" | "assistant"; text: string }[];
   pendingConfirm: { resolve: (approved: boolean) => void; timer: NodeJS.Timeout } | null;
+}
+
+/** Cancel and clear a parked paid-call confirmation, if any. */
+function clearPendingConfirm(state: ChatState): void {
+  if (state.pendingConfirm) {
+    clearTimeout(state.pendingConfirm.timer);
+    state.pendingConfirm = null;
+  }
 }
 
 export interface StartBotOptions {
@@ -199,9 +207,10 @@ export function startBot(
         history: state.history,
       });
 
+      // Push the pair, then trim to the most recent messages (always an even count).
       state.history.push({ role: "user", text }, { role: "assistant", text: answer });
-      if (state.history.length > HISTORY_LIMIT) {
-        state.history.splice(0, state.history.length - HISTORY_LIMIT);
+      if (state.history.length > HISTORY_MESSAGES) {
+        state.history.splice(0, state.history.length - HISTORY_MESSAGES);
       }
       await sendChunked(ctx.api, id, answer);
     } catch (err) {
@@ -209,6 +218,9 @@ export function startBot(
       await ctx.reply("Sorry — I hit an error answering that. Check the logs.");
     } finally {
       state.busy = false;
+      // If a paid-call confirmation was still parked (e.g. answerQuestion threw before
+      // the user replied), clear its timer so it can't fire later on a stale context.
+      clearPendingConfirm(state);
     }
   });
 

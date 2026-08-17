@@ -60,8 +60,9 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
   const { releases, creditsRemaining } = result;
   const inserted = upsertReleases(db, releases);
   const now = new Date().toISOString();
-  setLastRun(db, now);
 
+  // The credits were spent on the fetch regardless of whether the digest is delivered,
+  // so record the reading now.
   if (creditsRemaining !== null) {
     logCredits(db, creditsRemaining);
   }
@@ -78,11 +79,16 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
   if (releases.length === 0) {
     // Nothing new — don't spend Claude tokens on an empty digest.
     await send(`📦 No new releases as of ${now.slice(0, 10)}. Quiet day.`);
+    setLastRun(db, now);
     return;
   }
 
   const digest = await generateDigest(config.anthropic.model, releases);
   await send(digest);
+  // Advance last_run only after a successful send. If generateDigest or send throws,
+  // last_run is untouched so the next run retries these releases rather than skipping
+  // them permanently. (Re-fetch may re-spend credits, but the daily digest is the point.)
+  setLastRun(db, now);
 
   if (creditsRemaining !== null && creditsRemaining <= LOW_CREDIT_THRESHOLD) {
     await send(
