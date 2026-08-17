@@ -53,3 +53,21 @@ When PR Agent flags something, add an entry below in this format:
   `canUseTool` callback, never in the prompt; (2) when embedding user text as history,
   collapse newlines, label it context-only, and delimit turns so injected role lines
   can't masquerade as real ones.
+
+## Advance a progress marker only after the work it gates succeeds  (PR #4, 2026-08-17)
+- **Flagged:** `dailyJob` called `setLastRun` right after fetching, before the digest was
+  generated/sent. A Claude or Telegram failure would leave `last_run` advanced, so those
+  releases would never be summarised on a later run.
+- **Rule:** persist a "done up to here" marker (`last_run`, offsets, cursors) **after** the
+  side effect it represents has succeeded — so a transient failure retries rather than
+  silently skipping. Accept the small cost of re-doing idempotent work on retry.
+
+## Clean up timers and parked async state in `finally`, not just the happy path  (PR #4, 2026-08-17)
+- **Flagged:** the paid-call confirmation parked a `setTimeout`; if `answerQuestion` threw
+  before the user replied, the timer was never cleared and would later fire on a stale
+  context.
+- **Rule:** any `setTimeout`/pending promise/lock created in a handler must be released in
+  a `finally` (or equivalent), covering the throw path — not only when things go right.
+- **TS note:** an early-return truthy guard narrows a nullable field to `null` for the rest
+  of the scope, so a later `if (x)` sees `never`. Move the cleanup into a helper that takes
+  the owning object as a parameter to get the full declared type back.

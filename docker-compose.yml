@@ -1,0 +1,12 @@
+services:
+  release-agent:
+    build: .
+    container_name: release-agent
+    # Secrets and settings come from .env (never committed). See .env.example.
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      # Persist the SQLite cache, last_run, and credit log across restarts.
+      - ./data:/data
+    restart: unless-stopped
