@@ -139,17 +139,21 @@ function extractCredits(parsed: unknown): number | null {
  */
 export function parseCreditsRemaining(text: string): number | null {
   if (!text) return null;
+  // Header form first (the reliable source); the textual variants are bounded hedges in
+  // case the CLI prints the balance as prose rather than echoing the raw header. `\d+`
+  // never captures a sign, so no non-negativity check is needed (credits floor at 0
+  // anyway — an exhausted account 402s rather than going negative).
   const patterns = [
     /x-credits-remaining["']?\s*[:=]\s*(\d+)/i,
-    /credits[-\s]?remaining["']?\s*[:=]\s*(\d+)/i,
-    /remaining\s+credits?["']?\s*[:=]?\s*(\d+)/i,
-    /(\d+)\s+credits?\s+remaining/i,
+    /\bcredits[-\s]?remaining["']?\s*[:=]\s*(\d+)/i,
+    /\bremaining\s+credits?["']?\s*[:=]?\s*(\d+)/i,
+    /\b(\d+)\s+credits?\s+remaining\b/i,
   ];
   for (const re of patterns) {
     const m = re.exec(text);
     if (m) {
       const n = Number(m[1]);
-      if (Number.isFinite(n) && n >= 0) return n;
+      if (Number.isFinite(n)) return n;
     }
   }
   return null;
