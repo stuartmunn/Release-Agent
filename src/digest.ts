@@ -118,9 +118,12 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
     digest = fallbackDigest(releases, now);
   }
   await send(digest);
-  // Advance last_run only after a successful send. If send throws, last_run is untouched
-  // so the next run retries these releases rather than skipping them permanently.
-  // (Re-fetch may re-spend credits, but the daily digest is the point.)
+  // Advance last_run once the user has been notified — whether via the real digest or the
+  // fallback list; both count as "delivered". We deliberately do NOT retry a generation
+  // failure on the next run: that would re-fetch (re-spending credits) and re-notify the
+  // same releases every day. The AI summary for a fallback day is recoverable for free with
+  // `--redigest`. If `send` itself throws, this line isn't reached, so last_run stays put
+  // and the releases are retried next run.
   setLastRun(db, now);
 
   if (creditsRemaining !== null && creditsRemaining <= LOW_CREDIT_THRESHOLD) {

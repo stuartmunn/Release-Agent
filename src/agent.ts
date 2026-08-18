@@ -62,10 +62,19 @@ export function isPaidReleasebotTool(name: string): boolean {
  * in the release notes, burning its turn budget and failing with `error_max_turns`. We
  * disallow the built-ins explicitly so they're never offered. The Releasebot MCP tools
  * (`mcp__releasebot__*`) aren't in this list, so follow-ups keep their intended toolset.
+ *
+ * Derived from the SDK's own tool inventory (`sdk-tools.d.ts`, v0.1.77). A few entries list
+ * both plausible spellings because the public tool string can differ from the input-type
+ * name (an unmatched name in a denylist is a harmless no-op). The list tracks the SDK
+ * version, but it is NOT a single point of failure: if a later SDK adds a tool we don't
+ * list, the worst case is a wasted turn, caught by `generateDigest`'s low `maxTurns` and the
+ * fallback digest in `dailyJob` — never the original silent `error_max_turns`.
  */
 export const BUILTIN_TOOLS = [
   "Bash",
   "BashOutput",
+  "TaskOutput",
+  "KillShell",
   "KillBash",
   "Read",
   "Write",
@@ -76,7 +85,12 @@ export const BUILTIN_TOOLS = [
   "WebFetch",
   "WebSearch",
   "Task",
+  "Agent",
   "TodoWrite",
+  "ExitPlanMode",
+  "ListMcpResources",
+  "ReadMcpResource",
+  "AskUserQuestion",
 ] as const;
 
 /** Stdio MCP config for the Releasebot server, with the API key scoped to it. */
@@ -239,10 +253,11 @@ export async function generateDigest(model: string, releases: Release[]): Promis
     model,
     systemPrompt,
     // The digest is pure text generation — no tools. `disallowedTools` (not an empty
-    // `allowedTools`, which the SDK ignores) is what actually keeps built-ins off.
+    // `allowedTools`, which the SDK ignores) is what actually keeps built-ins off. One turn
+    // suffices; the low cap fails fast (to the fallback) if a tool ever sneaks back in.
     disallowedTools: [...BUILTIN_TOOLS],
     settingSources: [], // no filesystem/settings sources
-    maxTurns: 4,
+    maxTurns: 2,
   });
   logger.info({ costUsd, releaseCount: releases.length }, "generated daily digest");
   return text.trim();
