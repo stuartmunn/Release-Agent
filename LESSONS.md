@@ -96,21 +96,31 @@ When PR Agent flags something, add an entry below in this format:
 - **Also:** cache the *full* notes (`formattedContent`), not just the short summary, so
   follow-ups are genuinely answerable from cache without a paid live call.
 
-## An empty `allowedTools` is not "no tools" — the digest reached for WebFetch  (live run, 2026-08-18)
-- **Found:** `generateDigest` ran with `allowedTools: []`, intending a tool-free text gen,
-  but the Agent SDK treats an **empty allowlist as "no filter"** — every built-in tool stays
-  on offer. The model kept calling `WebFetch` on the URLs in the release notes, exhausting
-  `maxTurns: 2` and failing with `error_max_turns`, so no digest was sent (and on the cron
-  path the failure was silent — `runDailyJob().catch()` only logs).
-- **Rule:** to run a query with no built-in tools, list them in **`disallowedTools`** — don't
-  rely on an empty `allowedTools`. Verified: with the built-ins disallowed the digest
-  completes in one turn at `maxTurns: 2`. Keep `maxTurns` low so a stray tool attempt fails
-  fast rather than looping expensively.
-- **Also:** a user-facing job that can fail (model/network) must degrade, not vanish. The
-  daily job now sends a plain fallback list if generation throws, so silence never happens.
-- **Debugging note:** reproduce digest generation for **zero Releasebot credits** via the
-  cached rows (a throwaway probe importing `dist/` + the SDK), and log each streamed
-  message's `type`/`stop_reason`/tool-use blocks to see what's actually consuming turns.
+## A tool-free SDK query needs three things, not one — the digest kept hitting error_max_turns  (live run, 2026-08-18/19)
+- **Found (in layers):** `generateDigest` was meant to be a tool-free text gen but repeatedly
+  failed with `error_max_turns`. Three distinct causes, each uncovered only after fixing the
+  previous:
+  1. `allowedTools: []` does **not** mean "no tools" — the SDK treats an empty allowlist as
+     "no filter", so every built-in stayed on offer and the model called `WebFetch` on the
+     URLs in the notes.
+  2. `disallowedTools` blocks a tool from **executing**, but **not from being attempted** —
+     each denied attempt still costs a turn. So a *low* `maxTurns` doesn't "fail fast", it
+     fails *needlessly*: the model needs a couple of turns to recover from its own attempt.
+  3. The prompt was **advertising a tool**: `DIGEST_SYSTEM` said "Follow the daily-digest
+     **skill**" and the content was injected under `# Skill: …` headers, so the model reached
+     for the built-in `Skill` tool (~40% of runs, nondeterministic).
+- **Rule — to run genuinely tool-free, do all three:** (1) block execution with
+  **`disallowedTools`** listing the built-ins (never rely on empty `allowedTools`); (2) keep
+  the prompt free of anything that *names/invites* a tool — inject skill files under neutral
+  headers and don't say "skill" (see `instructionBlock`); (3) leave **turn headroom**
+  (`maxTurns` 6, not 2) so a rare stray attempt recovers instead of failing. Verified 14/14
+  after the prompt reword (was ~40% failing).
+- **Also:** a user-facing job that can still fail (model/network) must degrade, not vanish —
+  `dailyJob` sends a plain fallback list if generation throws, so silence never happens.
+- **Debugging note:** reproduce for **zero Releasebot credits** from the cached rows (a
+  throwaway probe importing `dist/` + the SDK). Log each streamed message's `type` and
+  tool-use block names, and **run it several times** — this bug was nondeterministic, so a
+  single passing probe (my first mistake) proves nothing; loop 5–8×.
 
 ## Make schema migrations and bulk re-derivations atomic  (PR #7, 2026-08-17)
 - **Flagged:** `migrate()` split its DDL across two `db.exec` calls (a crash between them

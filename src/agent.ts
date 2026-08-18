@@ -91,6 +91,8 @@ export const BUILTIN_TOOLS = [
   "ListMcpResources",
   "ReadMcpResource",
   "AskUserQuestion",
+  "Skill",
+  "SlashCommand",
 ] as const;
 
 /** Stdio MCP config for the Releasebot server, with the API key scoped to it. */
@@ -217,14 +219,28 @@ export function buildConversationPrompt(
   );
 }
 
+// NB: these prompts deliberately avoid the word "skill" (and we inject the skill files
+// under neutral headers via `instructionBlock`). Advertising "skill" makes the model reach
+// for the built-in `Skill` tool — a tool attempt that wastes turns (and blew the digest's
+// budget → error_max_turns). We inject the content directly instead, so there's nothing to
+// go and load.
 const DIGEST_SYSTEM =
   "You summarise software release notes for one busy technical user, delivered over " +
-  "Telegram. Follow the daily-digest skill exactly.";
+  "Telegram. Follow the formatting rules below exactly. Reply with the finished digest " +
+  "text only.";
 
 const ANSWER_SYSTEM =
   "You answer a user's follow-up questions about software releases over Telegram. " +
-  "Follow the release-deep-dive and vendors skills. Be brief, plain, and accurate, and " +
-  "conserve Releasebot credits by answering from the cache first.";
+  "Follow the guidance below. Be brief, plain, and accurate, and conserve Releasebot " +
+  "credits by answering from the cache first.";
+
+/**
+ * Inject a project skill file's content as plain instructions under a neutral header.
+ * We never label it "Skill:" — see the note on the system prompts above.
+ */
+function instructionBlock(title: string, skillName: string): string {
+  return `---\n# ${title}\n${readSkill(skillName)}`;
+}
 
 /** Iterate a query to completion and return the final assistant text + cost. */
 async function runQuery(
@@ -246,18 +262,24 @@ async function runQuery(
 
 /** Produce the daily digest text (Telegram-ready plain text). No tools, no credits. */
 export async function generateDigest(model: string, releases: Release[]): Promise<string> {
-  const systemPrompt = `${DIGEST_SYSTEM}\n\n---\n# Skill: daily-digest\n${readSkill("daily-digest")}\n\n---\n# Skill: vendors\n${readSkill("vendors")}`;
+  const systemPrompt = [
+    DIGEST_SYSTEM,
+    instructionBlock("Daily digest formatting rules", "daily-digest"),
+    instructionBlock("Vendor focus", "vendors"),
+  ].join("\n\n");
   const prompt = `Today's new releases to summarise:\n\n${buildReleaseContext(releases)}`;
 
   const { text, costUsd } = await runQuery(prompt, {
     model,
     systemPrompt,
-    // The digest is pure text generation — no tools. `disallowedTools` (not an empty
-    // `allowedTools`, which the SDK ignores) is what actually keeps built-ins off. One turn
-    // suffices; the low cap fails fast (to the fallback) if a tool ever sneaks back in.
+    // The digest needs no tools. `disallowedTools` (not an empty `allowedTools`, which the
+    // SDK ignores) blocks the built-ins from *executing*. But blocking execution doesn't
+    // stop the model *attempting* a call — each attempt costs a turn — so we also (a) keep
+    // the prompt free of anything that invites a tool (see instructionBlock) and (b) leave
+    // real turn headroom so a rare stray attempt recovers instead of failing.
     disallowedTools: [...BUILTIN_TOOLS],
     settingSources: [], // no filesystem/settings sources
-    maxTurns: 2,
+    maxTurns: 6,
   });
   logger.info({ costUsd, releaseCount: releases.length }, "generated daily digest");
   return text.trim();
@@ -280,8 +302,8 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
     ANSWER_SYSTEM,
     `Releasebot tier: ${p.tier}. Free searches are fine; paid live calls require user ` +
       `approval (the app enforces this).`,
-    `---\n# Skill: release-deep-dive\n${readSkill("release-deep-dive")}`,
-    `---\n# Skill: vendors\n${readSkill("vendors")}`,
+    instructionBlock("Answering follow-ups", "release-deep-dive"),
+    instructionBlock("Vendor focus", "vendors"),
     `---\n# Cached releases (answer from these first)\n${buildReleaseContext(p.releases, { includeContent: true, maxChars: 4000 })}`,
   ].join("\n\n");
 
