@@ -9,6 +9,7 @@
  * Runnable directly for manual testing: `npm run digest:now`.
  */
 import type { Config } from "./config.js";
+import type { Release } from "./types.js";
 import { loadConfig } from "./config.js";
 import {
   getAllReleases,
@@ -35,6 +36,21 @@ import { logger } from "./logger.js";
 const LOW_CREDIT_THRESHOLD = 40;
 /** Safety cap so a large backlog can't drain credits in a single fetch. */
 const FEED_LIMIT = 50;
+
+/**
+ * Plain-text digest used when Claude can't produce the summary (model error, etc.), so the
+ * daily job always delivers something. Mirrors the daily-digest skill's plain-text rules.
+ */
+function fallbackDigest(releases: Release[], nowIso: string): string {
+  const lines = releases.map(
+    (r) => `• ${r.vendor}${r.product ? ` / ${r.product}` : ""} — ${r.title}`,
+  );
+  return (
+    `📦 ${releases.length} new release(s) for ${nowIso.slice(0, 10)} ` +
+    `(couldn't generate the summary — raw list):\n\n${lines.join("\n")}\n\n` +
+    `Reply to dig into any of these.`
+  );
+}
 
 export interface DailyJobDeps {
   config: Config;
@@ -91,11 +107,23 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
     return;
   }
 
-  const digest = await generateDigest(config.anthropic.model, releases);
+  // Generate the summary, but never let a generation hiccup swallow the whole digest:
+  // the releases are already fetched (and paid for), so on failure we still deliver a
+  // plain list rather than leaving the user in silence.
+  let digest: string;
+  try {
+    digest = await generateDigest(config.anthropic.model, releases);
+  } catch (err) {
+    logger.error({ err }, "digest generation failed; sending plain fallback list");
+    digest = fallbackDigest(releases, now);
+  }
   await send(digest);
-  // Advance last_run only after a successful send. If generateDigest or send throws,
-  // last_run is untouched so the next run retries these releases rather than skipping
-  // them permanently. (Re-fetch may re-spend credits, but the daily digest is the point.)
+  // Advance last_run once the user has been notified — whether via the real digest or the
+  // fallback list; both count as "delivered". We deliberately do NOT retry a generation
+  // failure on the next run: that would re-fetch (re-spending credits) and re-notify the
+  // same releases every day. The AI summary for a fallback day is recoverable for free with
+  // `--redigest`. If `send` itself throws, this line isn't reached, so last_run stays put
+  // and the releases are retried next run.
   setLastRun(db, now);
 
   if (creditsRemaining !== null && creditsRemaining <= LOW_CREDIT_THRESHOLD) {

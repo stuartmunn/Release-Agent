@@ -96,6 +96,22 @@ When PR Agent flags something, add an entry below in this format:
 - **Also:** cache the *full* notes (`formattedContent`), not just the short summary, so
   follow-ups are genuinely answerable from cache without a paid live call.
 
+## An empty `allowedTools` is not "no tools" — the digest reached for WebFetch  (live run, 2026-08-18)
+- **Found:** `generateDigest` ran with `allowedTools: []`, intending a tool-free text gen,
+  but the Agent SDK treats an **empty allowlist as "no filter"** — every built-in tool stays
+  on offer. The model kept calling `WebFetch` on the URLs in the release notes, exhausting
+  `maxTurns: 2` and failing with `error_max_turns`, so no digest was sent (and on the cron
+  path the failure was silent — `runDailyJob().catch()` only logs).
+- **Rule:** to run a query with no built-in tools, list them in **`disallowedTools`** — don't
+  rely on an empty `allowedTools`. Verified: with the built-ins disallowed the digest
+  completes in one turn at `maxTurns: 2`. Keep `maxTurns` low so a stray tool attempt fails
+  fast rather than looping expensively.
+- **Also:** a user-facing job that can fail (model/network) must degrade, not vanish. The
+  daily job now sends a plain fallback list if generation throws, so silence never happens.
+- **Debugging note:** reproduce digest generation for **zero Releasebot credits** via the
+  cached rows (a throwaway probe importing `dist/` + the SDK), and log each streamed
+  message's `type`/`stop_reason`/tool-use blocks to see what's actually consuming turns.
+
 ## Make schema migrations and bulk re-derivations atomic  (PR #7, 2026-08-17)
 - **Flagged:** `migrate()` split its DDL across two `db.exec` calls (a crash between them
   could leave a half-built schema), and `renormaliseIfNeeded` re-wrote all rows then
