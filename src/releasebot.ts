@@ -37,14 +37,24 @@ export class ReleasebotError extends Error {
   }
 }
 
-/** Run the CLI with the API key injected via env. Returns raw stdout. */
-async function runReleasebot(args: string[], apiKey: string): Promise<string> {
+interface CliResult {
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Run the CLI with the API key injected via env. Returns both streams: stdout carries
+ * the JSON payload, and stderr is where the CLI echoes diagnostics — including the
+ * `X-Credits-Remaining` response header, which is how we learn the remaining balance
+ * (the feed JSON body doesn't carry it). See `parseCreditsRemaining`.
+ */
+async function runReleasebot(args: string[], apiKey: string): Promise<CliResult> {
   try {
-    const { stdout } = await execFileAsync(CLI_BIN, args, {
+    const { stdout, stderr } = await execFileAsync(CLI_BIN, args, {
       env: { ...process.env, RELEASEBOT_API_KEY: apiKey },
       maxBuffer: MAX_BUFFER,
     });
-    return stdout;
+    return { stdout, stderr: stderr ?? "" };
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
     if (e.code === "ENOENT") {
@@ -114,6 +124,32 @@ function extractCredits(parsed: unknown): number | null {
     if (typeof val === "number") return val;
     if (typeof val === "string" && val.trim() !== "" && !Number.isNaN(Number(val))) {
       return Number(val);
+    }
+  }
+  return null;
+}
+
+/**
+ * Releasebot reports the remaining balance in the `X-Credits-Remaining` HTTP *header*,
+ * not the JSON body, so it surfaces on the CLI's stderr diagnostics rather than in the
+ * parsed feed. Scan text for it, most-specific pattern first. Scanned against stderr
+ * only (never release-note prose in stdout) so changelog text like "5 credits remaining"
+ * can't be mistaken for a balance. Returns null when nothing credit-shaped is present —
+ * behaviour then matches the pre-fix code exactly (no reading logged, no regression).
+ */
+export function parseCreditsRemaining(text: string): number | null {
+  if (!text) return null;
+  const patterns = [
+    /x-credits-remaining["']?\s*[:=]\s*(\d+)/i,
+    /credits[-\s]?remaining["']?\s*[:=]\s*(\d+)/i,
+    /remaining\s+credits?["']?\s*[:=]?\s*(\d+)/i,
+    /(\d+)\s+credits?\s+remaining/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n >= 0) return n;
     }
   }
   return null;
@@ -192,7 +228,7 @@ export async function fetchFeedSince(
   if (sinceIso) args.push("--since", sinceIso);
   if (limit && limit > 0) args.push("--limit", String(limit));
 
-  const stdout = await runReleasebot(args, apiKey);
+  const { stdout, stderr } = await runReleasebot(args, apiKey);
 
   let parsed: unknown;
   try {
@@ -206,7 +242,10 @@ export async function fetchFeedSince(
   }
 
   const releases = extractItems(parsed).map(normaliseRelease);
-  return { releases, creditsRemaining: extractCredits(parsed) };
+  // Prefer a balance in the JSON body if a future CLI version adds one; otherwise read
+  // the `X-Credits-Remaining` header the CLI echoes on stderr.
+  const creditsRemaining = extractCredits(parsed) ?? parseCreditsRemaining(stderr);
+  return { releases, creditsRemaining };
 }
 
 /**
