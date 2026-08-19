@@ -25,6 +25,11 @@ export interface Config {
   tz: string;
   /** Cron expression for the daily digest (default 08:30). */
   digestCron: string;
+  /**
+   * Days with at most this many releases get a plain code-rendered digest (0 Anthropic
+   * tokens); only busier days pay for an AI rollup. 0 = always use AI.
+   */
+  digestAiThreshold: number;
   /** Directory for the SQLite cache and other persisted state. */
   dataDir: string;
   /** Full path to the SQLite database file. */
@@ -42,6 +47,16 @@ function required(name: string): string {
 function optional(name: string, fallback: string): string {
   const value = process.env[name];
   return value === undefined || value.trim() === "" ? fallback : value.trim();
+}
+
+function optionalNonNegativeInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer, got: ${raw}`);
+  }
+  return value;
 }
 
 function parseTier(raw: string): ReleasebotTier {
@@ -68,6 +83,7 @@ export function loadConfig(): Config {
     },
     tz: optional("TZ", "Europe/London"),
     digestCron: optional("DIGEST_CRON", "30 8 * * *"),
+    digestAiThreshold: optionalNonNegativeInt("DIGEST_AI_THRESHOLD", 8),
     dataDir,
     dbPath: path.join(dataDir, "releasebot.sqlite"),
   };

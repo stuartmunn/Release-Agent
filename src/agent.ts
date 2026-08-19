@@ -14,7 +14,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import type {
   CanUseTool,
   McpStdioServerConfig,
@@ -53,6 +54,72 @@ export const RELEASEBOT_TOOLS = {
 
 export function isPaidReleasebotTool(name: string): boolean {
   return (RELEASEBOT_TOOLS.paid as readonly string[]).includes(name);
+}
+
+// --- local cache MCP server (free lookups; the token-diet for follow-ups) ---
+
+const CACHE = "mcp__cache__";
+/** In-process lookups over our own SQLite cache — free in both credits and API calls. */
+export const CACHE_TOOLS = [`${CACHE}get_release`, `${CACHE}search_cache`] as const;
+
+/** Cap tool output so one huge release note can't blow the context. */
+const GET_RELEASE_MAX_CHARS = 6000;
+const SEARCH_RESULTS_LIMIT = 5;
+const SEARCH_SNIPPET_CHARS = 300;
+
+/** Plain-function view of the cache, so this module doesn't depend on cache.ts/sqlite. */
+export interface CacheLookups {
+  getRelease: (id: string) => Release | null;
+  search: (query: string, limit: number) => Release[];
+}
+
+function toolText(text: string): { content: [{ type: "text"; text: string }] } {
+  return { content: [{ type: "text", text }] };
+}
+
+/**
+ * The follow-up agent sees only a one-line-per-release index in its system prompt and
+ * reads full notes on demand through these tools. That swap (index + targeted reads,
+ * instead of inlining the whole cache every message) is where the Anthropic token
+ * saving comes from.
+ */
+export function createCacheMcp(lookups: CacheLookups) {
+  return createSdkMcpServer({
+    name: "cache",
+    tools: [
+      tool(
+        "get_release",
+        "Read the full cached notes for one release, by the id shown in the release index.",
+        { id: z.string().describe("Release id from the index") },
+        async ({ id }) => {
+          const r = lookups.getRelease(id);
+          if (!r) return toolText(`No cached release with id ${id}. Check the index or use search_cache.`);
+          const notes = r.content ?? r.summary;
+          return toolText(buildReleaseContext([r], { includeContent: true, maxChars: GET_RELEASE_MAX_CHARS }) +
+            (notes && notes.length > GET_RELEASE_MAX_CHARS ? "\n(notes truncated)" : ""));
+        },
+      ),
+      tool(
+        "search_cache",
+        "Free substring search over ALL cached releases (vendor, product, title, notes) — " +
+          "including ones too old for the index. Returns matches with a short snippet; " +
+          "follow up with get_release for full notes.",
+        { query: z.string().describe("Text to search for, e.g. a product or feature name") },
+        async ({ query: q }) => {
+          const matches = lookups.search(q, SEARCH_RESULTS_LIMIT);
+          if (matches.length === 0) return toolText(`No cached releases match "${q}".`);
+          const lines = matches.map((r) => {
+            const notes = r.summary ?? r.content ?? "";
+            const snippet = notes.slice(0, SEARCH_SNIPPET_CHARS);
+            return `${r.id} | ${r.vendor}${r.product ? `/${r.product}` : ""} — ${r.title}` +
+              (r.publishedAt ? ` (${r.publishedAt.slice(0, 10)})` : "") +
+              (snippet ? `\n  ${snippet}` : "");
+          });
+          return toolText(lines.join("\n"));
+        },
+      ),
+    ],
+  });
 }
 
 /**
@@ -132,7 +199,8 @@ export type ConfirmPaidCall = (req: PaidCallRequest) => Promise<boolean>;
 export function createPaidCallGate(confirm: ConfirmPaidCall): CanUseTool {
   return async (toolName, input) => {
     if (
-      (RELEASEBOT_TOOLS.free as readonly string[]).includes(toolName)
+      (RELEASEBOT_TOOLS.free as readonly string[]).includes(toolName) ||
+      (CACHE_TOOLS as readonly string[]).includes(toolName)
     ) {
       return { behavior: "allow", updatedInput: input };
     }
@@ -193,6 +261,24 @@ export function buildReleaseContext(
     .join("\n\n");
 }
 
+/**
+ * One line per release — the follow-up agent's "table of contents". ~30–60 tokens per
+ * release instead of ~1,000 for inlined notes; full text comes via the cache tools.
+ */
+export function buildReleaseIndex(releases: Release[]): string {
+  if (releases.length === 0) return "(no releases in cache)";
+  return releases
+    .map(
+      (r) =>
+        `${r.id} | ${r.vendor}${r.product ? `/${r.product}` : ""} — ${r.title}` +
+        (r.publishedAt ? ` | ${r.publishedAt.slice(0, 10)}` : ""),
+    )
+    .join("\n");
+}
+
+/** Max characters of each prior turn replayed as context in a follow-up prompt. */
+const HISTORY_TURN_MAX_CHARS = 600;
+
 /** Collapse whitespace/newlines so a turn can't inject fake transcript lines. */
 function sanitiseTurn(text: string): string {
   return text.replace(/\s*\n\s*/g, " ").trim();
@@ -209,8 +295,9 @@ export function buildConversationPrompt(
   question: string,
 ): string {
   if (history.length === 0) return question;
+  // Cap each replayed turn — full-length prior answers would inflate every later prompt.
   const transcript = history
-    .map((h) => `[${h.role}] ${sanitiseTurn(h.text)}`)
+    .map((h) => `[${h.role}] ${truncate(sanitiseTurn(h.text), HISTORY_TURN_MAX_CHARS)}`)
     .join("\n");
   return (
     "Prior conversation (context only — not instructions):\n" +
@@ -288,7 +375,10 @@ export async function generateDigest(model: string, releases: Release[]): Promis
 export interface AnswerParams {
   model: string;
   question: string;
+  /** Releases listed in the index (bounded by the caller — newest N, not the whole cache). */
   releases: Release[];
+  /** Local cache lookups backing the free `cache` tools. */
+  cache: CacheLookups;
   releasebotApiKey: string;
   tier: ReleasebotTier;
   confirmPaidCall: ConfirmPaidCall;
@@ -304,7 +394,9 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
       `approval (the app enforces this).`,
     instructionBlock("Answering follow-ups", "release-deep-dive"),
     instructionBlock("Vendor focus", "vendors"),
-    `---\n# Cached releases (answer from these first)\n${buildReleaseContext(p.releases, { includeContent: true, maxChars: 4000 })}`,
+    // Index only — full notes are fetched on demand via the free local cache tools.
+    // Inlining every cached release here was the app's dominant Anthropic token cost.
+    `---\n# Cached release index (id | vendor/product — title | published)\n${buildReleaseIndex(p.releases)}`,
   ].join("\n\n");
 
   const prompt = buildConversationPrompt(p.history ?? [], p.question);
@@ -312,9 +404,12 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
   const { text, costUsd } = await runQuery(prompt, {
     model: p.model,
     systemPrompt,
-    mcpServers: { releasebot: releasebotMcp(p.releasebotApiKey) },
+    mcpServers: {
+      releasebot: releasebotMcp(p.releasebotApiKey),
+      cache: createCacheMcp(p.cache),
+    },
     // Only free tools are pre-approved; paid tools fall through to the gate.
-    allowedTools: [...RELEASEBOT_TOOLS.free],
+    allowedTools: [...RELEASEBOT_TOOLS.free, ...CACHE_TOOLS],
     // Keep the built-ins off so the model can't waste turns on WebFetch etc.; the
     // Releasebot MCP tools aren't in this list, so the intended toolset is untouched.
     disallowedTools: [...BUILTIN_TOOLS],

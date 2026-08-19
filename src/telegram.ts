@@ -14,7 +14,13 @@
 import { Bot } from "grammy";
 import type { Api } from "grammy";
 import { answerQuestion, type PaidCallRequest } from "./agent.js";
-import { getAllReleases, getLatestCredits, type Db } from "./cache.js";
+import {
+  getLatestCredits,
+  getRecentReleases,
+  getReleaseById,
+  searchReleases,
+  type Db,
+} from "./cache.js";
 import { logger } from "./logger.js";
 import type { ReleasebotTier } from "./types.js";
 
@@ -24,6 +30,11 @@ const TG_MAX = 4096;
 const CONFIRM_TIMEOUT_MS = 120_000;
 /** Conversation messages kept for context — 12 messages = 6 user/assistant turns. */
 const HISTORY_MESSAGES = 12;
+/**
+ * Newest releases listed in the follow-up agent's index. Bounds the system prompt no
+ * matter how big the cache grows; older releases stay reachable via search_cache.
+ */
+const INDEX_LIMIT = 200;
 
 export function createBot(token: string): Bot {
   return new Bot(token);
@@ -200,7 +211,11 @@ export function startBot(
       const answer = await answerQuestion({
         model,
         question: text,
-        releases: getAllReleases(db),
+        releases: getRecentReleases(db, INDEX_LIMIT),
+        cache: {
+          getRelease: (releaseId) => getReleaseById(db, releaseId),
+          search: (query, limit) => searchReleases(db, query, limit),
+        },
         releasebotApiKey,
         tier,
         confirmPaidCall,

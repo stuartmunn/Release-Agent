@@ -62,7 +62,10 @@ function main(): void {
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
 
-  logger.info("release-agent is up");
+  logger.info(
+    { model: config.anthropic.model, digestAiThreshold: config.digestAiThreshold },
+    "release-agent is up",
+  );
 }
 
 main();

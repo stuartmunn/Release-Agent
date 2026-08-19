@@ -37,19 +37,71 @@ const LOW_CREDIT_THRESHOLD = 40;
 /** Safety cap so a large backlog can't drain credits in a single fetch. */
 const FEED_LIMIT = 50;
 
+/** First line of a release's summary, trimmed to fit on one digest bullet. */
+function summaryFirstLine(r: Release, max = 120): string | null {
+  const text = (r.summary ?? r.content)?.trim();
+  if (!text) return null;
+  const line = (text.split("\n")[0] ?? "").trim();
+  return line.length <= max ? line : `${line.slice(0, max)}…`;
+}
+
 /**
- * Plain-text digest used when Claude can't produce the summary (model error, etc.), so the
- * daily job always delivers something. Mirrors the daily-digest skill's plain-text rules.
+ * Code-rendered digest straight from the cache — zero Anthropic tokens. Used for quiet
+ * days (the normal case) and as the fallback when AI generation fails on a busy day.
+ * Mirrors the daily-digest formatting rules: grouped by vendor, plain text, skimmable.
  */
-function fallbackDigest(releases: Release[], nowIso: string): string {
-  const lines = releases.map(
-    (r) => `• ${r.vendor}${r.product ? ` / ${r.product}` : ""} — ${r.title}`,
-  );
+export function plainDigest(
+  releases: Release[],
+  nowIso: string,
+  opts: { note?: string } = {},
+): string {
+  const byVendor = new Map<string, Release[]>();
+  for (const r of releases) {
+    const list = byVendor.get(r.vendor) ?? [];
+    list.push(r);
+    byVendor.set(r.vendor, list);
+  }
+  const sections = [...byVendor.entries()].map(([vendor, rs]) => {
+    const bullets = rs.map((r) => {
+      const head = `• ${r.product && r.product !== vendor ? `${r.product} — ` : ""}${r.title}`;
+      const summary = summaryFirstLine(r);
+      const lines = [head];
+      if (summary) lines.push(`  ${summary}`);
+      if (r.url) lines.push(`  ${r.url}`);
+      return lines.join("\n");
+    });
+    return `${vendor}\n${bullets.join("\n")}`;
+  });
   return (
-    `📦 ${releases.length} new release(s) for ${nowIso.slice(0, 10)} ` +
-    `(couldn't generate the summary — raw list):\n\n${lines.join("\n")}\n\n` +
+    `📦 ${releases.length} new release(s) for ${nowIso.slice(0, 10)}` +
+    `${opts.note ? ` ${opts.note}` : ""}:\n\n${sections.join("\n\n")}\n\n` +
     `Reply to dig into any of these.`
   );
+}
+
+/**
+ * Hybrid digest: quiet days are rendered by plain code (free); only days with more than
+ * `aiThreshold` releases pay for an AI rollup — and an AI failure still degrades to the
+ * plain list rather than silence.
+ */
+async function buildDigest(
+  config: Config,
+  releases: Release[],
+  nowIso: string,
+): Promise<string> {
+  if (releases.length <= config.digestAiThreshold) {
+    logger.info(
+      { count: releases.length, threshold: config.digestAiThreshold },
+      "quiet day: plain digest, skipping Claude",
+    );
+    return plainDigest(releases, nowIso);
+  }
+  try {
+    return await generateDigest(config.anthropic.model, releases);
+  } catch (err) {
+    logger.error({ err }, "digest generation failed; sending plain fallback list");
+    return plainDigest(releases, nowIso, { note: "(summary unavailable — raw list)" });
+  }
 }
 
 export interface DailyJobDeps {
@@ -107,17 +159,7 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
     return;
   }
 
-  // Generate the summary, but never let a generation hiccup swallow the whole digest:
-  // the releases are already fetched (and paid for), so on failure we still deliver a
-  // plain list rather than leaving the user in silence.
-  let digest: string;
-  try {
-    digest = await generateDigest(config.anthropic.model, releases);
-  } catch (err) {
-    logger.error({ err }, "digest generation failed; sending plain fallback list");
-    digest = fallbackDigest(releases, now);
-  }
-  await send(digest);
+  await send(await buildDigest(config, releases, now));
   // Advance last_run once the user has been notified — whether via the real digest or the
   // fallback list; both count as "delivered". We deliberately do NOT retry a generation
   // failure on the next run: that would re-fetch (re-spending credits) and re-notify the
@@ -148,7 +190,7 @@ export async function redigest({ config, db, send }: DailyJobDeps): Promise<void
     return;
   }
   logger.info({ count: releases.length }, "redigest: summarising cached releases");
-  await send(await generateDigest(config.anthropic.model, releases));
+  await send(await buildDigest(config, releases, new Date().toISOString()));
 }
 
 /** Manual one-shot entrypoint. `--now` fetches + digests; `--redigest` re-summarises cache. */
