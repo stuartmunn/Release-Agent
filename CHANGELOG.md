@@ -13,6 +13,12 @@ Telegram command reads it back — today / this calendar month / last calendar m
 bucketed in `config.tz` (DST-correct) — with no AI involved in answering, since that would
 undercut the very savings PR #11 made.
 
+**Review fixes:** `localMidnightIso`'s DST offset now converges to a fixed point instead of
+trusting a single guess (matters for zones whose transition lands near local midnight —
+verified against `Pacific/Apia`'s 2011 dateline skip, not reachable from `Europe/London`
+alone). A failed Claude query still bills for turns already spent, so `ClaudeQueryError`
+now carries that partial `costUsd` through to `cost_log` instead of losing it on error.
+
 ## PR #11 — Token diet: hybrid plain digest + index/lookup follow-ups (2026-08-19)
 **Why:** Anthropic API spend (~$1.73) was on track to make the app not worth running.
 The dominant structural cost: every Telegram follow-up rebuilt a system prompt containing

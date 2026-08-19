@@ -29,7 +29,7 @@ import {
   normaliseRelease,
   ReleasebotError,
 } from "./releasebot.js";
-import { generateDigest } from "./agent.js";
+import { ClaudeQueryError, generateDigest } from "./agent.js";
 import { createBot, sendChunked } from "./telegram.js";
 import { logger } from "./logger.js";
 
@@ -103,6 +103,9 @@ async function buildDigest(
     logCost(db, "digest", costUsd);
     return text;
   } catch (err) {
+    // Anthropic still bills for the turns spent before a failed query, so log that spend
+    // even though the digest itself falls back to the plain list.
+    if (err instanceof ClaudeQueryError) logCost(db, "digest", err.costUsd);
     logger.error({ err }, "digest generation failed; sending plain fallback list");
     return plainDigest(releases, nowIso, { note: "(summary unavailable — raw list)" });
   }

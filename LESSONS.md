@@ -149,3 +149,13 @@ When PR Agent flags something, add an entry below in this format:
   real timezone with a midnight-adjacent transition (`Pacific/Apia`'s Dec 2011 dateline
   skip, which removed a whole calendar day at local midnight): the one-pass version
   invented a fake 24h day; the two-pass version correctly collapsed it away.
+
+## A failed Claude query still bills — don't throw its cost away  (PR #12, 2026-08-19)
+- **Flagged:** `runQuery` threw a plain `Error` on any non-success result subtype, but the
+  SDK's error-subtype result messages (`error_max_turns`, `error_during_execution`, etc.)
+  still carry `total_cost_usd` — Anthropic bills for the turns spent before the failure.
+  That cost was silently lost from `cost_log` on every failed digest/follow-up.
+- **Rule:** when a typed API result distinguishes success/failure but both carry billing
+  data, preserve that data on the failure path too — don't let a generic `throw new
+  Error(...)` discard fields the caller needs. Added `ClaudeQueryError` (carries `costUsd`
+  + `subtype`) so `digest.ts`/`telegram.ts` can `logCost` even in their `catch` blocks.

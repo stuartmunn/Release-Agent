@@ -13,7 +13,7 @@
  */
 import { Bot } from "grammy";
 import type { Api } from "grammy";
-import { answerQuestion, type PaidCallRequest } from "./agent.js";
+import { answerQuestion, ClaudeQueryError, type PaidCallRequest } from "./agent.js";
 import {
   getCostSummary,
   getLatestCredits,
@@ -245,6 +245,9 @@ export function startBot(
       }
       await sendChunked(ctx.api, id, answer);
     } catch (err) {
+      // Anthropic still bills for the turns spent before a failed query — log that spend
+      // even though the user gets an error instead of an answer.
+      if (err instanceof ClaudeQueryError) logCost(db, "answer", err.costUsd);
       logger.error({ err }, "failed to answer question");
       await ctx.reply("Sorry — I hit an error answering that. Check the logs.");
     } finally {
