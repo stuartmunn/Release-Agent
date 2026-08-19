@@ -148,8 +148,9 @@ The `.claude/skills/` folder is the editable "what I care about" layer — plain
 - [`daily-digest`](.claude/skills/daily-digest/SKILL.md) — the digest's format and priorities.
 - [`release-deep-dive`](.claude/skills/release-deep-dive/SKILL.md) — how follow-ups are
   answered, and the credit discipline.
-- [`vendors`](.claude/skills/vendors/SKILL.md) — per-vendor focus. **Add your own vendors
-  here** (copy the Chrome/Node pattern) and the digests and answers follow suit.
+- [`vendors`](.claude/skills/vendors/SKILL.md) — per-vendor focus, e.g. security-first for
+  Microsoft, quality-of-life-first for Claude Code. **These are worked examples to copy and
+  adapt** — replace or extend them with the vendors and priorities that matter to you.
 
 Edit a file, rebuild/restart the container, and the behaviour changes — no code needed.
 

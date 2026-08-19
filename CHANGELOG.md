@@ -3,6 +3,15 @@
 What changed and, more importantly, **why**. Newest first. One section per PR (or
 notable live fix), added in the same PR as the change itself — see CLAUDE.md.
 
+## PR #14 — Microsoft and Claude Code vendor skill examples (2026-08-19)
+**Why:** the `vendors` skill only had two worked examples (Chrome, Node), both leading with
+security/breaking-changes. Wanted a second pattern shown — a vendor tuned for something
+other than security — so the skill is a clearer template to copy from.
+**What:** two new entries in `.claude/skills/vendors/SKILL.md` — Microsoft (security-first:
+Patch Tuesday, CVEs, advisories) and Claude Code (quality-of-life-first: workflow/UX/DX
+improvements over routine fixes). Pure content change, no code — picked up by the next
+digest/follow-up automatically. README's skills section updated to point at both patterns.
+
 ## PR #13 — Personal-use disclaimer in the README (2026-08-19)
 **Why:** the README's credit/token-discipline sections, read alone, could land as "here's
 how to get more out of Releasebot while paying less" — not the intent.
