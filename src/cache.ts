@@ -164,6 +164,59 @@ export function getAllReleases(db: Db): Release[] {
   return rows.map(rowToRelease);
 }
 
+/**
+ * The `limit` newest releases — used to build the follow-up agent's compact index, so
+ * the prompt stays bounded no matter how big the cache grows. Older rows remain
+ * reachable via `searchReleases`.
+ */
+export function getRecentReleases(db: Db, limit: number): Release[] {
+  const rows = db
+    .prepare(
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json
+       FROM releases
+       ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC
+       LIMIT ?`,
+    )
+    .all(limit) as ReleaseRow[];
+  return rows.map(rowToRelease);
+}
+
+/** One release by its exact id, or null if not cached. */
+export function getReleaseById(db: Db, id: string): Release | null {
+  const row = db
+    .prepare(
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json
+       FROM releases
+       WHERE id = ?`,
+    )
+    .get(id) as ReleaseRow | undefined;
+  return row ? rowToRelease(row) : null;
+}
+
+/**
+ * Case-insensitive substring search over vendor/product/title/summary/content — free,
+ * local, and reaches the whole cache (including rows too old for the index). The query
+ * is LIKE-escaped so user text can't inject wildcards.
+ */
+export function searchReleases(db: Db, query: string, limit: number): Release[] {
+  const escaped = query.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const pattern = `%${escaped}%`;
+  const rows = db
+    .prepare(
+      `SELECT id, vendor, product, title, url, published_at, discovered_at, summary, content, raw_json
+       FROM releases
+       WHERE vendor  LIKE ? ESCAPE '\\'
+          OR product LIKE ? ESCAPE '\\'
+          OR title   LIKE ? ESCAPE '\\'
+          OR summary LIKE ? ESCAPE '\\'
+          OR content LIKE ? ESCAPE '\\'
+       ORDER BY COALESCE(discovered_at, published_at, fetched_at) DESC
+       LIMIT ?`,
+    )
+    .all(pattern, pattern, pattern, pattern, pattern, limit) as ReleaseRow[];
+  return rows.map(rowToRelease);
+}
+
 /** Releases discovered on/after `sinceIso` (used to build "today's" digest). */
 export function getReleasesSince(db: Db, sinceIso: string): Release[] {
   const rows = db
