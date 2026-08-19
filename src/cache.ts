@@ -2,10 +2,12 @@
  * Local SQLite cache — the source of truth for follow-up questions.
  *
  * The daily feed is paid for once, cached in full here, and follow-ups read from
- * this store (0 credits). Three tables:
+ * this store (0 credits). Four tables:
  *   - releases    : one row per release, keyed by id; `raw_json` holds the full payload.
  *   - meta        : key/value scratch (e.g. `last_run` timestamp).
  *   - credit_log  : running record of remaining Releasebot credits over time.
+ *   - cost_log    : one row per Claude call, so Anthropic spend survives container
+ *                   restarts (unlike `docker logs`, which resets with the process).
  *
  * better-sqlite3 is synchronous, which keeps this code simple and race-free for a
  * single-process app.
@@ -57,6 +59,14 @@ function migrate(db: Db): void {
         ts        TEXT NOT NULL,
         remaining INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS cost_log (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts       TEXT NOT NULL,
+        kind     TEXT NOT NULL,
+        cost_usd REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cost_log_ts ON cost_log (ts);
     `);
 
     // Add columns introduced after the first release, for databases created earlier.
@@ -297,4 +307,96 @@ export function getLatestCredits(db: Db): number | null {
     .prepare(`SELECT remaining FROM credit_log ORDER BY id DESC LIMIT 1`)
     .get() as { remaining: number } | undefined;
   return row?.remaining ?? null;
+}
+
+// --- cost log ---
+
+/** Record one Claude call's cost so spend survives container restarts. */
+export function logCost(db: Db, kind: "digest" | "answer", costUsd: number): void {
+  db.prepare(`INSERT INTO cost_log (ts, kind, cost_usd) VALUES (?, ?, ?)`).run(
+    new Date().toISOString(),
+    kind,
+    costUsd,
+  );
+}
+
+/**
+ * Local calendar Y-M-D for `instant` in `tz` (e.g. "2026-08-19"), using the same IANA
+ * timezone the digest cron runs in — so "today"/"this month" mean the user's actual day,
+ * not a UTC one that can be off by up to an hour either side of midnight.
+ */
+function localDateParts(instant: Date, tz: string): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value);
+  return { year: get("year"), month: get("month"), day: get("day") };
+}
+
+/** How far `tz`'s local wall clock is ahead of UTC at `instantMs`, in milliseconds. */
+function tzOffsetMs(instantMs: number, tz: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(instantMs));
+  const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value);
+  const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return asUtc - instantMs;
+}
+
+/**
+ * The UTC instant (as an ISO string) at which local midnight starts, for a given local
+ * Y-M-D in `tz`. Computes the timezone's actual offset at that moment rather than
+ * assuming a fixed one — correct across DST transitions (BST/GMT included).
+ */
+function localMidnightIso(year: number, month: number, day: number, tz: string): string {
+  const targetAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0);
+  const offset = tzOffsetMs(targetAsUtc, tz);
+  return new Date(targetAsUtc - offset).toISOString();
+}
+
+/** Sum of `cost_usd` for rows with `ts` in `[startIso, endIso)` (end optional = open). */
+function sumCost(db: Db, startIso: string, endIso?: string): number {
+  const row = endIso
+    ? (db
+        .prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE ts >= ? AND ts < ?`)
+        .get(startIso, endIso) as { total: number })
+    : (db
+        .prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE ts >= ?`)
+        .get(startIso) as { total: number });
+  return row.total;
+}
+
+/** Anthropic spend so far today, this calendar month, and last calendar month, in `tz`. */
+export function getCostSummary(
+  db: Db,
+  tz: string,
+): { today: number; thisMonth: number; lastMonth: number } {
+  const now = localDateParts(new Date(), tz);
+  const todayStart = localMidnightIso(now.year, now.month, now.day, tz);
+  const monthStart = localMidnightIso(now.year, now.month, 1, tz);
+
+  const lastMonthDate = new Date(Date.UTC(now.year, now.month - 1, 1));
+  lastMonthDate.setUTCMonth(lastMonthDate.getUTCMonth() - 1);
+  const lastMonthStart = localMidnightIso(
+    lastMonthDate.getUTCFullYear(),
+    lastMonthDate.getUTCMonth() + 1,
+    1,
+    tz,
+  );
+
+  return {
+    today: sumCost(db, todayStart),
+    thisMonth: sumCost(db, monthStart),
+    lastMonth: sumCost(db, lastMonthStart, monthStart),
+  };
 }

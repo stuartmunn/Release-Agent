@@ -3,6 +3,16 @@
 What changed and, more importantly, **why**. Newest first. One section per PR (or
 notable live fix), added in the same PR as the change itself — see CLAUDE.md.
 
+## PR #12 — Durable Anthropic cost tracking + /cost (2026-08-19)
+**Why:** `docker logs | grep costUsd` can't answer "what have I spent today / this month /
+last month" — container logs reset on every restart, and nothing summed the numbers even
+while they were there.
+**What:** a new `cost_log` table (mirrors the existing `credit_log` pattern) records every
+Claude call's `costUsd`, which `agent.ts` previously logged and threw away. A new `/cost`
+Telegram command reads it back — today / this calendar month / last calendar month,
+bucketed in `config.tz` (DST-correct) — with no AI involved in answering, since that would
+undercut the very savings PR #11 made.
+
 ## PR #11 — Token diet: hybrid plain digest + index/lookup follow-ups (2026-08-19)
 **Why:** Anthropic API spend (~$1.73) was on track to make the app not worth running.
 The dominant structural cost: every Telegram follow-up rebuilt a system prompt containing

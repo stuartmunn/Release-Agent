@@ -348,7 +348,10 @@ async function runQuery(
 // --- public API ---
 
 /** Produce the daily digest text (Telegram-ready plain text). No tools, no credits. */
-export async function generateDigest(model: string, releases: Release[]): Promise<string> {
+export async function generateDigest(
+  model: string,
+  releases: Release[],
+): Promise<{ text: string; costUsd: number }> {
   const systemPrompt = [
     DIGEST_SYSTEM,
     instructionBlock("Daily digest formatting rules", "daily-digest"),
@@ -369,7 +372,7 @@ export async function generateDigest(model: string, releases: Release[]): Promis
     maxTurns: 6,
   });
   logger.info({ costUsd, releaseCount: releases.length }, "generated daily digest");
-  return text.trim();
+  return { text: text.trim(), costUsd };
 }
 
 export interface AnswerParams {
@@ -387,7 +390,9 @@ export interface AnswerParams {
 }
 
 /** Answer a follow-up question, cache-first with a gated paid-call fallback. */
-export async function answerQuestion(p: AnswerParams): Promise<string> {
+export async function answerQuestion(
+  p: AnswerParams,
+): Promise<{ text: string; costUsd: number }> {
   const systemPrompt = [
     ANSWER_SYSTEM,
     `Releasebot tier: ${p.tier}. Free searches are fine; paid live calls require user ` +
@@ -418,5 +423,5 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
     maxTurns: 8,
   });
   logger.info({ costUsd }, "answered follow-up question");
-  return text.trim();
+  return { text: text.trim(), costUsd };
 }

@@ -15,9 +15,11 @@ import { Bot } from "grammy";
 import type { Api } from "grammy";
 import { answerQuestion, type PaidCallRequest } from "./agent.js";
 import {
+  getCostSummary,
   getLatestCredits,
   getRecentReleases,
   getReleaseById,
+  logCost,
   searchReleases,
   type Db,
 } from "./cache.js";
@@ -107,6 +109,8 @@ export interface StartBotOptions {
   model: string;
   releasebotApiKey: string;
   tier: ReleasebotTier;
+  /** IANA timezone for "today"/"this month" boundaries in /cost. */
+  tz: string;
 }
 
 const HELP_TEXT = [
@@ -118,6 +122,7 @@ const HELP_TEXT = [
   "Commands:",
   "  /digest  — re-send the latest summary I have",
   "  /credits — remaining Releasebot credits (last known)",
+  "  /cost    — Anthropic spend: today / this month / last month",
   "  /help    — this message",
 ].join("\n");
 
@@ -129,7 +134,7 @@ export function startBot(
   opts: StartBotOptions,
   onDigestRequest: () => Promise<void>,
 ): void {
-  const { bot, chatId, db, model, releasebotApiKey, tier } = opts;
+  const { bot, chatId, db, model, releasebotApiKey, tier, tz } = opts;
   const states = new Map<string, ChatState>();
 
   const stateFor = (id: string): ChatState => {
@@ -159,6 +164,16 @@ export function startBot(
       remaining === null
         ? "No credit reading yet — I'll know after the next fetch."
         : `Releasebot credits remaining (last known): ${remaining}.`,
+    );
+  });
+
+  bot.command("cost", (ctx) => {
+    const { today, thisMonth, lastMonth } = getCostSummary(db, tz);
+    return ctx.reply(
+      `💰 Anthropic spend\n` +
+        `Today: $${today.toFixed(2)}\n` +
+        `This month: $${thisMonth.toFixed(2)}\n` +
+        `Last month: $${lastMonth.toFixed(2)}`,
     );
   });
 
@@ -208,7 +223,7 @@ export function startBot(
           void sendChunked(ctx.api, id, describePaidCall(req));
         });
 
-      const answer = await answerQuestion({
+      const { text: answer, costUsd } = await answerQuestion({
         model,
         question: text,
         releases: getRecentReleases(db, INDEX_LIMIT),
@@ -221,6 +236,7 @@ export function startBot(
         confirmPaidCall,
         history: state.history,
       });
+      logCost(db, "answer", costUsd);
 
       // Push the pair, then trim to the most recent messages (always an even count).
       state.history.push({ role: "user", text }, { role: "assistant", text: answer });
