@@ -329,6 +329,21 @@ function instructionBlock(title: string, skillName: string): string {
   return `---\n# ${title}\n${readSkill(skillName)}`;
 }
 
+/**
+ * A query that reached a `result` message but didn't succeed. The SDK still reports
+ * `total_cost_usd` on every error subtype (Anthropic bills for the turns spent before the
+ * failure), so callers that persist cost can log it even though the call otherwise failed.
+ */
+export class ClaudeQueryError extends Error {
+  constructor(
+    public readonly subtype: string,
+    public readonly costUsd: number,
+  ) {
+    super(`Claude query failed: ${subtype}`);
+    this.name = "ClaudeQueryError";
+  }
+}
+
 /** Iterate a query to completion and return the final assistant text + cost. */
 async function runQuery(
   prompt: string,
@@ -339,7 +354,7 @@ async function runQuery(
       if (message.subtype === "success") {
         return { text: message.result, costUsd: message.total_cost_usd };
       }
-      throw new Error(`Claude query failed: ${message.subtype}`);
+      throw new ClaudeQueryError(message.subtype, message.total_cost_usd);
     }
   }
   throw new Error("Claude query produced no result message.");
@@ -348,7 +363,10 @@ async function runQuery(
 // --- public API ---
 
 /** Produce the daily digest text (Telegram-ready plain text). No tools, no credits. */
-export async function generateDigest(model: string, releases: Release[]): Promise<string> {
+export async function generateDigest(
+  model: string,
+  releases: Release[],
+): Promise<{ text: string; costUsd: number }> {
   const systemPrompt = [
     DIGEST_SYSTEM,
     instructionBlock("Daily digest formatting rules", "daily-digest"),
@@ -369,7 +387,7 @@ export async function generateDigest(model: string, releases: Release[]): Promis
     maxTurns: 6,
   });
   logger.info({ costUsd, releaseCount: releases.length }, "generated daily digest");
-  return text.trim();
+  return { text: text.trim(), costUsd };
 }
 
 export interface AnswerParams {
@@ -387,7 +405,9 @@ export interface AnswerParams {
 }
 
 /** Answer a follow-up question, cache-first with a gated paid-call fallback. */
-export async function answerQuestion(p: AnswerParams): Promise<string> {
+export async function answerQuestion(
+  p: AnswerParams,
+): Promise<{ text: string; costUsd: number }> {
   const systemPrompt = [
     ANSWER_SYSTEM,
     `Releasebot tier: ${p.tier}. Free searches are fine; paid live calls require user ` +
@@ -418,5 +438,5 @@ export async function answerQuestion(p: AnswerParams): Promise<string> {
     maxTurns: 8,
   });
   logger.info({ costUsd }, "answered follow-up question");
-  return text.trim();
+  return { text: text.trim(), costUsd };
 }

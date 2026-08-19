@@ -33,6 +33,7 @@ function main(): void {
       model: config.anthropic.model,
       releasebotApiKey: config.releasebot.apiKey,
       tier: config.releasebot.tier,
+      tz: config.tz,
     },
     runDailyJob,
   );

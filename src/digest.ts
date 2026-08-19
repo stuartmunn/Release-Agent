@@ -14,6 +14,7 @@ import { loadConfig } from "./config.js";
 import {
   getAllReleases,
   getLastRun,
+  logCost,
   logCredits,
   openDb,
   renormaliseIfNeeded,
@@ -28,7 +29,7 @@ import {
   normaliseRelease,
   ReleasebotError,
 } from "./releasebot.js";
-import { generateDigest } from "./agent.js";
+import { ClaudeQueryError, generateDigest } from "./agent.js";
 import { createBot, sendChunked } from "./telegram.js";
 import { logger } from "./logger.js";
 
@@ -86,6 +87,7 @@ export function plainDigest(
  */
 async function buildDigest(
   config: Config,
+  db: Db,
   releases: Release[],
   nowIso: string,
 ): Promise<string> {
@@ -97,8 +99,13 @@ async function buildDigest(
     return plainDigest(releases, nowIso);
   }
   try {
-    return await generateDigest(config.anthropic.model, releases);
+    const { text, costUsd } = await generateDigest(config.anthropic.model, releases);
+    logCost(db, "digest", costUsd);
+    return text;
   } catch (err) {
+    // Anthropic still bills for the turns spent before a failed query, so log that spend
+    // even though the digest itself falls back to the plain list.
+    if (err instanceof ClaudeQueryError) logCost(db, "digest", err.costUsd);
     logger.error({ err }, "digest generation failed; sending plain fallback list");
     return plainDigest(releases, nowIso, { note: "(summary unavailable — raw list)" });
   }
@@ -159,7 +166,7 @@ export async function dailyJob({ config, db, send }: DailyJobDeps): Promise<void
     return;
   }
 
-  await send(await buildDigest(config, releases, now));
+  await send(await buildDigest(config, db, releases, now));
   // Advance last_run once the user has been notified — whether via the real digest or the
   // fallback list; both count as "delivered". We deliberately do NOT retry a generation
   // failure on the next run: that would re-fetch (re-spending credits) and re-notify the
@@ -190,7 +197,7 @@ export async function redigest({ config, db, send }: DailyJobDeps): Promise<void
     return;
   }
   logger.info({ count: releases.length }, "redigest: summarising cached releases");
-  await send(await buildDigest(config, releases, new Date().toISOString()));
+  await send(await buildDigest(config, db, releases, new Date().toISOString()));
 }
 
 /** Manual one-shot entrypoint. `--now` fetches + digests; `--redigest` re-summarises cache. */

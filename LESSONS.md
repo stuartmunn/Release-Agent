@@ -131,3 +131,31 @@ When PR Agent flags something, add an entry below in this format:
   in a single `db.transaction(...)` so it fully succeeds or fully rolls back. Stamp the
   "done" marker inside the same transaction. (`CREATE ... IF NOT EXISTS` is idempotent, but
   atomicity is clearer and safer than relying on next-boot self-repair.)
+
+## Computing a timezone's UTC offset for a target local instant needs a fixed point, not one guess  (PR #12, 2026-08-19)
+- **Flagged:** `localMidnightIso` (converts a local Y-M-D in `config.tz` to the UTC instant
+  it starts at, for `/cost`'s today/this-month boundaries) read the DST offset at the naive
+  UTC guess (`Date.UTC(y, m-1, d)`), not at the actual local-midnight instant. That's only
+  safe for a timezone whose DST transition doesn't land within a day of local midnight —
+  true for `Europe/London` (transitions at 1am), not guaranteed for every IANA zone
+  `config.tz` could be set to.
+- **Rule:** when converting a *local* wall-clock instant to UTC via an offset that itself
+  depends on the UTC instant (DST offsets, but the pattern is general), don't trust the
+  offset at your first guess — re-read the offset at the candidate result and use that
+  (two passes is enough in practice; offsets don't jump twice in a day). One pass is a
+  latent bug that only shows up for inputs you didn't test against.
+- **Verification:** since London's transitions never land near midnight, this can't be
+  caught by testing `Europe/London` alone — proved the fix mattered by testing against a
+  real timezone with a midnight-adjacent transition (`Pacific/Apia`'s Dec 2011 dateline
+  skip, which removed a whole calendar day at local midnight): the one-pass version
+  invented a fake 24h day; the two-pass version correctly collapsed it away.
+
+## A failed Claude query still bills — don't throw its cost away  (PR #12, 2026-08-19)
+- **Flagged:** `runQuery` threw a plain `Error` on any non-success result subtype, but the
+  SDK's error-subtype result messages (`error_max_turns`, `error_during_execution`, etc.)
+  still carry `total_cost_usd` — Anthropic bills for the turns spent before the failure.
+  That cost was silently lost from `cost_log` on every failed digest/follow-up.
+- **Rule:** when a typed API result distinguishes success/failure but both carry billing
+  data, preserve that data on the failure path too — don't let a generic `throw new
+  Error(...)` discard fields the caller needs. Added `ClaudeQueryError` (carries `costUsd`
+  + `subtype`) so `digest.ts`/`telegram.ts` can `logCost` even in their `catch` blocks.
