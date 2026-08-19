@@ -19,6 +19,8 @@ daily digest is sent there and all questions come back through the same chat. No
   feedback. Apply those rules up-front. After PR Agent flags something new, append the lesson.
 - **Always branch.** Never commit to `main`. Name branches `feat/…`, `fix/…`, `chore/…`,
   push, open a PR, let PR Agent review, then merge.
+- **Update [`CHANGELOG.md`](./CHANGELOG.md) in every PR** — a short section (newest first)
+  saying what changed and *why* (the problem it solves), not just a list of edits.
 - Remote: `https://github.com/stuartmunn/Release-Agent.git`.
 
 ## Voice (how the app talks to the user)
