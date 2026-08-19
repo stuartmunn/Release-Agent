@@ -357,11 +357,20 @@ function tzOffsetMs(instantMs: number, tz: string): number {
  * The UTC instant (as an ISO string) at which local midnight starts, for a given local
  * Y-M-D in `tz`. Computes the timezone's actual offset at that moment rather than
  * assuming a fixed one — correct across DST transitions (BST/GMT included).
+ *
+ * The offset is read at the *candidate* instant and re-checked once: a single pass would
+ * use the offset at the naive UTC guess, which is only right for zones whose DST
+ * transition doesn't land within a day of local midnight (true for Europe/London, whose
+ * clocks change at 1am — but not guaranteed for every IANA zone `config.tz` could name).
+ * Iterating to a fixed point makes this correct generally, not just for our default zone.
  */
 function localMidnightIso(year: number, month: number, day: number, tz: string): string {
   const targetAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0);
-  const offset = tzOffsetMs(targetAsUtc, tz);
-  return new Date(targetAsUtc - offset).toISOString();
+  let candidate = targetAsUtc - tzOffsetMs(targetAsUtc, tz);
+  // One re-check against the candidate's own offset converges except in the (real-world
+  // nonexistent) case of a DST shift larger than a day, so two passes suffice.
+  candidate = targetAsUtc - tzOffsetMs(candidate, tz);
+  return new Date(candidate).toISOString();
 }
 
 /** Sum of `cost_usd` for rows with `ts` in `[startIso, endIso)` (end optional = open). */
