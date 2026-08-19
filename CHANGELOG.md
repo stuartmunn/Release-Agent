@@ -3,6 +3,12 @@
 What changed and, more importantly, **why**. Newest first. One section per PR (or
 notable live fix), added in the same PR as the change itself — see CLAUDE.md.
 
+## PR #13 — Personal-use disclaimer in the README (2026-08-19)
+**Why:** the README's credit/token-discipline sections, read alone, could land as "here's
+how to get more out of Releasebot while paying less" — not the intent.
+**What:** a short new README section states plainly that this is a personal, single-user
+project, and that Releasebot's own service is worth paying for if it's useful to you.
+
 ## PR #12 — Durable Anthropic cost tracking + /cost (2026-08-19)
 **Why:** `docker logs | grep costUsd` can't answer "what have I spent today / this month /
 last month" — container logs reset on every restart, and nothing summed the numbers even
