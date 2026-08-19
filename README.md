@@ -53,6 +53,15 @@ minimises that too:
   calendar month — read from a local log, not from Anthropic's dashboard, and not itself
   an AI call.
 
+## A note on why it's built this way
+
+This is a personal project — a single-user Telegram front end for my own Releasebot feed.
+The credit-conscious design above is about not wasting *my own* API calls on a hobby
+project, not about getting more out of Releasebot than a subscription is meant to provide.
+Releasebot does the real work here — tracking and normalising release feeds across
+vendors — and if it's useful to you, the right thing is to support them with a plan that
+matches how you use it.
+
 ## How it works
 
 One long-running Node/TypeScript container with two duties sharing a local SQLite cache:
