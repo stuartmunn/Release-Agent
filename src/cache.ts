@@ -76,6 +76,18 @@ function migrate(db: Db): void {
     if (!cols.has("content")) {
       db.exec(`ALTER TABLE releases ADD COLUMN content TEXT`);
     }
+
+    // Cache-token columns, added after cost_log's first release — see `logCost`.
+    const costLogCols = new Set(
+      (db.prepare(`PRAGMA table_info(cost_log)`).all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!costLogCols.has("cache_read_tokens")) {
+      db.exec(`
+        ALTER TABLE cost_log ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE cost_log ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE cost_log ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+      `);
+    }
   })();
 }
 
@@ -311,12 +323,29 @@ export function getLatestCredits(db: Db): number | null {
 
 // --- cost log ---
 
-/** Record one Claude call's cost so spend survives container restarts. */
-export function logCost(db: Db, kind: "digest" | "answer", costUsd: number): void {
-  db.prepare(`INSERT INTO cost_log (ts, kind, cost_usd) VALUES (?, ?, ?)`).run(
+export interface CallUsage {
+  costUsd: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  inputTokens: number;
+}
+
+/**
+ * Record one Claude call's cost and prompt-cache token counts, so spend (and cache
+ * effectiveness) survive container restarts. The cache counts come straight off the SDK's
+ * `result` message usage — see `agent.ts`'s `runQuery`.
+ */
+export function logCost(db: Db, kind: "digest" | "answer", usage: CallUsage): void {
+  db.prepare(
+    `INSERT INTO cost_log (ts, kind, cost_usd, cache_read_tokens, cache_creation_tokens, input_tokens)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
     new Date().toISOString(),
     kind,
-    costUsd,
+    usage.costUsd,
+    usage.cacheReadTokens,
+    usage.cacheCreationTokens,
+    usage.inputTokens,
   );
 }
 
@@ -385,11 +414,40 @@ function sumCost(db: Db, startIso: string, endIso?: string): number {
   return row.total;
 }
 
+/**
+ * Today's prompt-cache token totals for follow-up questions — the read/creation split
+ * shows whether Anthropic's automatic caching is actually landing, not just enabled.
+ * Scoped to `kind = 'answer'` *and* "today": `generateDigest` calls structurally can't
+ * hit cache (see CHANGELOG), so including them would dilute the very signal this is
+ * meant to show, the same dilution the "today, not this month" scoping already avoids.
+ */
+function sumTodayCacheUsage(
+  db: Db,
+  todayStartIso: string,
+): { cacheReadTokens: number; cacheCreationTokens: number; inputTokens: number } {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+              COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,
+              COALESCE(SUM(input_tokens), 0) AS inputTokens
+       FROM cost_log WHERE ts >= ? AND kind = 'answer'`,
+    )
+    .get(todayStartIso) as { cacheReadTokens: number; cacheCreationTokens: number; inputTokens: number };
+  return row;
+}
+
 /** Anthropic spend so far today, this calendar month, and last calendar month, in `tz`. */
 export function getCostSummary(
   db: Db,
   tz: string,
-): { today: number; thisMonth: number; lastMonth: number } {
+): {
+  today: number;
+  thisMonth: number;
+  lastMonth: number;
+  todayCacheReadTokens: number;
+  todayCacheCreationTokens: number;
+  todayInputTokens: number;
+} {
   const now = localDateParts(new Date(), tz);
   const todayStart = localMidnightIso(now.year, now.month, now.day, tz);
   const monthStart = localMidnightIso(now.year, now.month, 1, tz);
@@ -403,9 +461,13 @@ export function getCostSummary(
     tz,
   );
 
+  const todayCache = sumTodayCacheUsage(db, todayStart);
   return {
     today: sumCost(db, todayStart),
     thisMonth: sumCost(db, monthStart),
     lastMonth: sumCost(db, lastMonthStart, monthStart),
+    todayCacheReadTokens: todayCache.cacheReadTokens,
+    todayCacheCreationTokens: todayCache.cacheCreationTokens,
+    todayInputTokens: todayCache.inputTokens,
   };
 }

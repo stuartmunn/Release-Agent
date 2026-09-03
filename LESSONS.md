@@ -159,3 +159,23 @@ When PR Agent flags something, add an entry below in this format:
   data, preserve that data on the failure path too — don't let a generic `throw new
   Error(...)` discard fields the caller needs. Added `ClaudeQueryError` (carries `costUsd`
   + `subtype`) so `digest.ts`/`telegram.ts` can `logCost` even in their `catch` blocks.
+
+## A metric meant to isolate one code path must filter to it, not just narrow the time window  (PR #15, 2026-09-03)
+- **Flagged:** `/cost`'s new cache-hit ratio summed `cost_log` across both `"digest"` and
+  `"answer"` rows for "today". The PR's own reasoning established that `generateDigest`
+  calls structurally can never hit the prompt cache (they run ~once/day, past any
+  reachable TTL) — so a digest running the same day as follow-ups dilutes the exact
+  signal the ratio exists to show, the same dilution problem the "today, not this month"
+  scoping was already written to avoid one level up.
+- **Rule:** when a metric is meant to isolate one code path's behaviour, filter to that
+  path explicitly (`WHERE kind = 'answer'`) — narrowing the time window alone doesn't do
+  it if a different, structurally-different call kind can still land inside that window.
+
+## Round-to-display can itself cross a unit boundary  (PR #15, 2026-09-03)
+- **Flagged:** `formatTokens` switched to a "K" suffix at `n >= 1000` and rendered
+  `(n / 1000).toFixed(1)`, but a value like 999,950 rounds to `"1000.0K"` instead of
+  `"1.0M"` — the boundary check ran on the raw value, not the value after rounding.
+- **Rule:** when formatting picks a unit/suffix based on a threshold and then rounds for
+  display, round first (or compute the exact point where rounding crosses the next
+  threshold) and branch on that — checking the threshold against the pre-rounded number
+  leaves a gap where the displayed text implies a size class the check didn't select.

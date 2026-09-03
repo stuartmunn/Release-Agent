@@ -3,6 +3,25 @@
 What changed and, more importantly, **why**. Newest first. One section per PR (or
 notable live fix), added in the same PR as the change itself — see CLAUDE.md.
 
+## PR #15 — Prompt-cache token logging + /cost cache-hit line (2026-09-03)
+**Why:** asked to assess whether Anthropic prompt caching could cut Claude spend further.
+Investigation (reading the installed `@anthropic-ai/claude-agent-sdk` source, since its
+public `Options` type exposes no `cache_control`/TTL knob) found caching is already applied
+automatically by the SDK's harness, on by default, 5-minute TTL — nothing to opt into. But
+two things followed from that: (1) `generateDigest` runs at most once/day, so the 24h gap
+between calls always exceeds any reachable TTL — caching structurally cannot help it, and
+isn't worth chasing; (2) `answerQuestion`'s system prompt (skills + release index) is
+byte-identical across consecutive same-day follow-ups, so rapid Q&A *should* already be
+hitting cache — but nothing in the app read the SDK's cache-usage numbers to confirm it.
+**What:** `runQuery` now captures `cache_read_input_tokens` / `cache_creation_input_tokens`
+/ `input_tokens` off the SDK's `result` message (already returned on every call, previously
+discarded) and threads them through `ClaudeQueryError`, `generateDigest`, and
+`answerQuestion`. `cost_log` gained matching columns; `/cost` now shows a same-day cache-hit
+line. Verified live (throwaway copy of the cache, zero Releasebot credits): running the same
+digest prompt twice back-to-back went from a full cache write (9,235 tokens) to a full cache
+read on the second call, cutting that call's cost from $0.094 to $0.016 — confirms the
+mechanism is real, not just present in the SDK's source.
+
 ## PR #14 — Microsoft and Claude Code vendor skill examples (2026-08-19)
 **Why:** the `vendors` skill only had two worked examples (Chrome, Node), both leading with
 security/breaking-changes. Wanted a second pattern shown — a vendor tuned for something

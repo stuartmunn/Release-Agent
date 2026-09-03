@@ -75,6 +75,15 @@ export async function sendChunked(api: Api, chatId: string, text: string): Promi
   }
 }
 
+/** Compact token count for `/cost`, e.g. 14234 -> "14.2K", 1234567 -> "1.2M". */
+function formatTokens(n: number): string {
+  // 999_950 is the exact point where rounding n/1000 to 1 decimal first reaches "1000.0"
+  // (999.95 rounds up) — below it, the "K" branch never displays a 4-digit number.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
 function parseYesNo(text: string): boolean {
   return /^\s*(y|yes|yeah|yep|ok|okay|sure|go|do it|approve|allow|fetch)\b/i.test(text);
 }
@@ -168,12 +177,21 @@ export function startBot(
   });
 
   bot.command("cost", (ctx) => {
-    const { today, thisMonth, lastMonth } = getCostSummary(db, tz);
+    const { today, thisMonth, lastMonth, todayCacheReadTokens, todayCacheCreationTokens, todayInputTokens } =
+      getCostSummary(db, tz);
+    const todayPromptTokens = todayCacheReadTokens + todayCacheCreationTokens + todayInputTokens;
+    // Omit the line on a day with no calls yet, rather than show a meaningless 0%.
+    const cacheLine =
+      todayPromptTokens > 0
+        ? `\nCache hit today: ${Math.round((todayCacheReadTokens / todayPromptTokens) * 100)}% ` +
+          `(${formatTokens(todayCacheReadTokens)} / ${formatTokens(todayPromptTokens)} prompt tokens)`
+        : "";
     return ctx.reply(
       `💰 Anthropic spend\n` +
         `Today: $${today.toFixed(2)}\n` +
         `This month: $${thisMonth.toFixed(2)}\n` +
-        `Last month: $${lastMonth.toFixed(2)}`,
+        `Last month: $${lastMonth.toFixed(2)}` +
+        cacheLine,
     );
   });
 
@@ -223,7 +241,7 @@ export function startBot(
           void sendChunked(ctx.api, id, describePaidCall(req));
         });
 
-      const { text: answer, costUsd } = await answerQuestion({
+      const { text: answer, costUsd, ...cacheUsage } = await answerQuestion({
         model,
         question: text,
         releases: getRecentReleases(db, INDEX_LIMIT),
@@ -236,7 +254,7 @@ export function startBot(
         confirmPaidCall,
         history: state.history,
       });
-      logCost(db, "answer", costUsd);
+      logCost(db, "answer", { costUsd, ...cacheUsage });
 
       // Push the pair, then trim to the most recent messages (always an even count).
       state.history.push({ role: "user", text }, { role: "assistant", text: answer });
@@ -247,7 +265,9 @@ export function startBot(
     } catch (err) {
       // Anthropic still bills for the turns spent before a failed query — log that spend
       // even though the user gets an error instead of an answer.
-      if (err instanceof ClaudeQueryError) logCost(db, "answer", err.costUsd);
+      if (err instanceof ClaudeQueryError) {
+        logCost(db, "answer", { costUsd: err.costUsd, ...err.cacheUsage });
+      }
       logger.error({ err }, "failed to answer question");
       await ctx.reply("Sorry — I hit an error answering that. Check the logs.");
     } finally {

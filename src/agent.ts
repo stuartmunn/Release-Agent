@@ -329,32 +329,58 @@ function instructionBlock(title: string, skillName: string): string {
   return `---\n# ${title}\n${readSkill(skillName)}`;
 }
 
+/** Prompt-cache token counts the SDK already returns on every `result` message. */
+export interface CacheUsage {
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  inputTokens: number;
+}
+
+/**
+ * Read via bracket access with a numeric fallback, not named properties: the SDK's own
+ * `NonNullableUsage` type is defined against `@anthropic-ai/sdk`'s `BetaUsage`, which isn't
+ * installed as a resolvable package here (it's bundled inside the Agent SDK's own
+ * dependency tree, not ours) — so `usage` resolves to an index-signature type at the type
+ * level even though the real values are present at runtime. Bracket access sidesteps that
+ * mismatch instead of asserting a shape TypeScript can't itself verify in this repo.
+ */
+function cacheUsageOf(usage: Record<string, number>): CacheUsage {
+  return {
+    cacheReadTokens: usage["cache_read_input_tokens"] ?? 0,
+    cacheCreationTokens: usage["cache_creation_input_tokens"] ?? 0,
+    inputTokens: usage["input_tokens"] ?? 0,
+  };
+}
+
 /**
  * A query that reached a `result` message but didn't succeed. The SDK still reports
  * `total_cost_usd` on every error subtype (Anthropic bills for the turns spent before the
  * failure), so callers that persist cost can log it even though the call otherwise failed.
+ * The same is true of `usage` (including cache read/creation counts), so that's kept too.
  */
 export class ClaudeQueryError extends Error {
   constructor(
     public readonly subtype: string,
     public readonly costUsd: number,
+    public readonly cacheUsage: CacheUsage,
   ) {
     super(`Claude query failed: ${subtype}`);
     this.name = "ClaudeQueryError";
   }
 }
 
-/** Iterate a query to completion and return the final assistant text + cost. */
+/** Iterate a query to completion and return the final assistant text + cost/cache usage. */
 async function runQuery(
   prompt: string,
   options: Options,
-): Promise<{ text: string; costUsd: number }> {
+): Promise<{ text: string; costUsd: number } & CacheUsage> {
   for await (const message of query({ prompt, options })) {
     if (message.type === "result") {
+      const cacheUsage = cacheUsageOf(message.usage);
       if (message.subtype === "success") {
-        return { text: message.result, costUsd: message.total_cost_usd };
+        return { text: message.result, costUsd: message.total_cost_usd, ...cacheUsage };
       }
-      throw new ClaudeQueryError(message.subtype, message.total_cost_usd);
+      throw new ClaudeQueryError(message.subtype, message.total_cost_usd, cacheUsage);
     }
   }
   throw new Error("Claude query produced no result message.");
@@ -366,7 +392,7 @@ async function runQuery(
 export async function generateDigest(
   model: string,
   releases: Release[],
-): Promise<{ text: string; costUsd: number }> {
+): Promise<{ text: string; costUsd: number } & CacheUsage> {
   const systemPrompt = [
     DIGEST_SYSTEM,
     instructionBlock("Daily digest formatting rules", "daily-digest"),
@@ -374,7 +400,7 @@ export async function generateDigest(
   ].join("\n\n");
   const prompt = `Today's new releases to summarise:\n\n${buildReleaseContext(releases)}`;
 
-  const { text, costUsd } = await runQuery(prompt, {
+  const { text, costUsd, ...cacheUsage } = await runQuery(prompt, {
     model,
     systemPrompt,
     // The digest needs no tools. `disallowedTools` (not an empty `allowedTools`, which the
@@ -386,8 +412,11 @@ export async function generateDigest(
     settingSources: [], // no filesystem/settings sources
     maxTurns: 6,
   });
-  logger.info({ costUsd, releaseCount: releases.length }, "generated daily digest");
-  return { text: text.trim(), costUsd };
+  // Caching can't help this call in practice — it runs at most once/day, far past any
+  // reachable cache TTL — but the counts are logged anyway since they cost nothing extra
+  // and confirm that expectation rather than assuming it.
+  logger.info({ costUsd, ...cacheUsage, releaseCount: releases.length }, "generated daily digest");
+  return { text: text.trim(), costUsd, ...cacheUsage };
 }
 
 export interface AnswerParams {
@@ -407,7 +436,7 @@ export interface AnswerParams {
 /** Answer a follow-up question, cache-first with a gated paid-call fallback. */
 export async function answerQuestion(
   p: AnswerParams,
-): Promise<{ text: string; costUsd: number }> {
+): Promise<{ text: string; costUsd: number } & CacheUsage> {
   const systemPrompt = [
     ANSWER_SYSTEM,
     `Releasebot tier: ${p.tier}. Free searches are fine; paid live calls require user ` +
@@ -421,7 +450,7 @@ export async function answerQuestion(
 
   const prompt = buildConversationPrompt(p.history ?? [], p.question);
 
-  const { text, costUsd } = await runQuery(prompt, {
+  const { text, costUsd, ...cacheUsage } = await runQuery(prompt, {
     model: p.model,
     systemPrompt,
     mcpServers: {
@@ -437,6 +466,9 @@ export async function answerQuestion(
     settingSources: [],
     maxTurns: 8,
   });
-  logger.info({ costUsd }, "answered follow-up question");
-  return { text: text.trim(), costUsd };
+  // The system prompt (skills + release index) is identical across consecutive follow-ups
+  // on the same day, so `cacheReadTokens` here is the real signal for whether the SDK's
+  // automatic prompt caching is doing anything for this app — see CHANGELOG.
+  logger.info({ costUsd, ...cacheUsage }, "answered follow-up question");
+  return { text: text.trim(), costUsd, ...cacheUsage };
 }
