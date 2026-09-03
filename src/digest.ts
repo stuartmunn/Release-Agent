@@ -99,13 +99,15 @@ async function buildDigest(
     return plainDigest(releases, nowIso);
   }
   try {
-    const { text, costUsd } = await generateDigest(config.anthropic.model, releases);
-    logCost(db, "digest", costUsd);
+    const { text, costUsd, ...cacheUsage } = await generateDigest(config.anthropic.model, releases);
+    logCost(db, "digest", { costUsd, ...cacheUsage });
     return text;
   } catch (err) {
     // Anthropic still bills for the turns spent before a failed query, so log that spend
     // even though the digest itself falls back to the plain list.
-    if (err instanceof ClaudeQueryError) logCost(db, "digest", err.costUsd);
+    if (err instanceof ClaudeQueryError) {
+      logCost(db, "digest", { costUsd: err.costUsd, ...err.cacheUsage });
+    }
     logger.error({ err }, "digest generation failed; sending plain fallback list");
     return plainDigest(releases, nowIso, { note: "(summary unavailable — raw list)" });
   }
