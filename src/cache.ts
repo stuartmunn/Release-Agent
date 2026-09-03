@@ -415,10 +415,11 @@ function sumCost(db: Db, startIso: string, endIso?: string): number {
 }
 
 /**
- * Today's prompt-cache token totals — the read/creation split shows whether Anthropic's
- * automatic caching is actually landing, not just enabled. Scoped to "today" only: a
- * month-wide ratio would be diluted by every digest call, which structurally can't hit
- * cache (see CHANGELOG) — today is the window where a genuine hit/miss signal exists.
+ * Today's prompt-cache token totals for follow-up questions — the read/creation split
+ * shows whether Anthropic's automatic caching is actually landing, not just enabled.
+ * Scoped to `kind = 'answer'` *and* "today": `generateDigest` calls structurally can't
+ * hit cache (see CHANGELOG), so including them would dilute the very signal this is
+ * meant to show, the same dilution the "today, not this month" scoping already avoids.
  */
 function sumTodayCacheUsage(
   db: Db,
@@ -429,7 +430,7 @@ function sumTodayCacheUsage(
       `SELECT COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
               COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,
               COALESCE(SUM(input_tokens), 0) AS inputTokens
-       FROM cost_log WHERE ts >= ?`,
+       FROM cost_log WHERE ts >= ? AND kind = 'answer'`,
     )
     .get(todayStartIso) as { cacheReadTokens: number; cacheCreationTokens: number; inputTokens: number };
   return row;

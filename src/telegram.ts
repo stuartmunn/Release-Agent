@@ -75,9 +75,13 @@ export async function sendChunked(api: Api, chatId: string, text: string): Promi
   }
 }
 
-/** Compact token count for `/cost`, e.g. 14234 -> "14.2K". */
+/** Compact token count for `/cost`, e.g. 14234 -> "14.2K", 1234567 -> "1.2M". */
 function formatTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  // 999_950 is the exact point where rounding n/1000 to 1 decimal first reaches "1000.0"
+  // (999.95 rounds up) — below it, the "K" branch never displays a 4-digit number.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
 }
 
 function parseYesNo(text: string): boolean {
